@@ -1,0 +1,83 @@
+/*
+ * Design tokens. Only atomic values here (colors, spacing, radii, shadows,
+ * fonts). All other layers reference these via var().
+ */
+:root {
+  color-scheme: dark;
+
+  /* Palette (neutral) */
+  --neutral-0: #0b0d12;
+  --neutral-1: #10131a;
+  --neutral-2: #161a24;
+  --neutral-3: #1c2130;
+  --neutral-4: #242a3a;
+  --neutral-5: #2f374a;
+  --neutral-6: #3d465a;
+  --neutral-7: #6a7386;
+  --neutral-8: #9aa2b4;
+  --neutral-9: #d3d7e0;
+  --neutral-10: #f5f6f9;
+
+  /* Accents */
+  --accent-500: #7c5cff;
+  --accent-400: #9682ff;
+  --accent-600: #5a3ee5;
+  --accent-glow: rgba(124, 92, 255, 0.35);
+
+  --success: #4ade80;
+  --warn: #fbbf24;
+  --danger: #ef4444;
+
+  /* Semantic — the rest of the app uses these */
+  --bg: var(--neutral-0);
+  --bg-elevated: var(--neutral-1);
+  --surface: var(--neutral-2);
+  --surface-hover: var(--neutral-3);
+  --surface-strong: var(--neutral-3);
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  --text: var(--neutral-10);
+  --text-muted: var(--neutral-8);
+  --text-dim: var(--neutral-7);
+
+  --user-bubble: linear-gradient(135deg, #6d5cff 0%, #4a3ce0 100%);
+  --user-bubble-fg: #ffffff;
+
+  /* Trace kind colors */
+  --kind-thought: #94a3ff;
+  --kind-action: #f5a8ff;
+  --kind-observation: #7fe3a4;
+  --kind-error: #ff8080;
+  --kind-final: #7dd3fc;
+
+  /* Type scale */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+
+  /* Radii */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 4px 20px -4px rgba(0, 0, 0, 0.35);
+  --shadow-glow: 0 0 0 1px var(--accent-glow), 0 8px 32px -8px var(--accent-glow);
+
+  /* Spacing scale (in px, using rem base 16) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* Layout */
+  --content-max: 860px;
+  --header-h: 56px;
+}
