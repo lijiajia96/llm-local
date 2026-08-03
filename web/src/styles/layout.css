@@ -105,9 +105,12 @@
   gap: var(--sp-2);
   flex-wrap: wrap;
 }
-.composer__row {
+.composer__shell {
   max-width: var(--content-max);
   margin: 0 auto;
+  position: relative;
+}
+.composer__row {
   display: flex;
   align-items: flex-end;
   gap: var(--sp-2);

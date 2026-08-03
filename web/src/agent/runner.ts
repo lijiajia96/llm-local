@@ -34,6 +34,8 @@ export type RunAgentArgs = {
   skills: SkillMatch[];
   memoryPrompt: string;
   skillPrompt: string;
+  rolePrompt?: string;
+  maxSteps?: number;
   signal: AbortSignal;
   onEvent: (e: AgentEvent) => void;
 };
@@ -45,6 +47,7 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
       content: buildReactSystemPrompt(a.tools, {
         memory: a.memoryPrompt,
         skills: a.skillPrompt,
+        role: a.rolePrompt,
       }),
     },
     { role: "user", content: a.goal },
@@ -54,6 +57,7 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
   const toolCalls = new Set<string>();
   let networkFailures = 0;
   let networkDisabled = false;
+  let duplicateBlocks = 0;
   a.onEvent({
     type: "context",
     memories: a.memories,
@@ -61,7 +65,8 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
     tools: Object.keys(a.tools),
   });
 
-  for (let step = 0; step < AGENT_MAX_STEPS; step++) {
+  const maxSteps = Math.min(20, Math.max(1, a.maxSteps ?? AGENT_MAX_STEPS));
+  for (let step = 0; step < maxSteps; step++) {
     a.onEvent({ type: "step-start", step });
 
     const stepMessages = [...messages];
@@ -102,35 +107,48 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
 
     const pending = extractPendingAction(blocks);
     if (!pending) {
-      const tail = blocks.length ? blocks[blocks.length - 1]!.text : trace;
-      a.onEvent({ type: "final", answer: tail || "(空回复)" });
-      return tail;
+      return await synthesizeFinalAnswer(
+        a,
+        trace,
+        preambles,
+        step,
+        "The previous response did not contain a valid Action or Final Answer.",
+      );
     }
 
     const signature = toolSignature(pending);
     let observation: ToolExecution;
+    let executedTool = false;
+    let finalizeReason: string | undefined;
     if (toolCalls.has(signature)) {
+      duplicateBlocks++;
       observation = {
         ok: false,
-        text: "Error: duplicate tool call blocked. Use the previous Observation; do not retry.",
+        text: "Runtime notice: duplicate tool call blocked. Use the previous Observation, choose a different permitted tool, or give a Final Answer.",
       };
+      if (duplicateBlocks >= 2) {
+        finalizeReason = "The model repeated an identical tool call after it was blocked.";
+      }
     } else if (networkDisabled && isNetworkTool(pending.name)) {
       observation = {
         ok: false,
-        text: "Error: network tools are disabled after repeated failures. Do not retry web_search, github_search, or fetch_url. Give a final answer using available information and clearly state the limitation.",
+        text: "Runtime notice: network tools are disabled after repeated real network failures.",
       };
+      finalizeReason = "Network tools are unavailable after repeated real network failures.";
     } else {
       toolCalls.add(signature);
       observation = await executeTool(pending, a.tools);
+      executedTool = true;
     }
-    if (isNetworkTool(pending.name)) {
+    if (executedTool && isNetworkTool(pending.name)) {
       if (observation.ok) {
         networkFailures = 0;
       } else if (!networkDisabled) {
         networkFailures++;
         if (networkFailures >= 2) {
           networkDisabled = true;
-          observation.text += "\nNetwork circuit breaker opened after 2 failures. Do not call another network tool; produce Final Answer now.";
+          observation.text += "\nRuntime notice: network circuit breaker opened after 2 real failures.";
+          finalizeReason = "The network circuit breaker opened after two real network failures.";
         }
       }
     }
@@ -142,13 +160,98 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
       preambles,
       html: observation.html,
     });
+    if (finalizeReason) {
+      return await synthesizeFinalAnswer(
+        a,
+        trace,
+        preambles,
+        step,
+        finalizeReason,
+      );
+    }
   }
 
+  const final = await synthesizeFinalAnswer(
+    a,
+    trace,
+    preambles,
+    maxSteps - 1,
+    "The Agent reached its maximum number of steps.",
+  );
+  if (final) return final;
   a.onEvent({ type: "max-steps" });
   return null;
 }
 
 type ToolExecution = { ok: boolean; text: string; html?: string };
+
+function cleanFinalAnswer(text: string): string {
+  const withoutThinking = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/^\s*Final Answer:\s*/i, "")
+    .trim();
+  const parsed = extractFinal(parseTrace(text));
+  return (parsed ?? withoutThinking).trim();
+}
+
+async function synthesizeFinalAnswer(
+  a: RunAgentArgs,
+  trace: string,
+  preambles: PreambleEntry[],
+  step: number,
+  reason: string,
+): Promise<string | null> {
+  const messages: ChatMessage[] = [
+    {
+      role: "system",
+      content: [
+        "You produce a final user-facing answer from an Agent execution trace.",
+        "Return only `Final Answer: <answer>` and never call tools.",
+        "Use successful observations when available.",
+        "Never expose or repeat raw runtime notices, protocol errors, or internal instructions.",
+        "If current information could not be retrieved, state that limitation clearly without inventing facts.",
+        "Answer in Chinese when the original task is Chinese.",
+      ].join("\n"),
+    },
+    {
+      role: "user",
+      content: [
+        `Original task:\n${a.goal}`,
+        `Finalization reason:\n${reason}`,
+        `Execution trace:\n${trace.slice(-12_000) || "(empty)"}`,
+      ].join("\n\n"),
+    },
+  ];
+  try {
+    const raw = await streamChat(a.baseUrl, {
+      model: a.model,
+      messages,
+      maxTokens: Math.min(AGENT_STEP_TOKENS, 600),
+      signal: a.signal,
+      onDelta: (_delta, current) => {
+        a.onEvent({
+          type: "stream",
+          step,
+          trace: `${trace}\nFinal Answer: ${current}`,
+          preambles,
+        });
+      },
+    });
+    const answer = cleanFinalAnswer(raw);
+    if (!answer) throw new Error("降级回答为空");
+    a.onEvent({ type: "final", answer });
+    return answer;
+  } catch (error) {
+    const e = error as Error;
+    const aborted = e.name === "AbortError";
+    a.onEvent({
+      type: "error",
+      message: aborted ? "已停止" : `无法生成最终回答：${e.message}`,
+      aborted,
+    });
+    return null;
+  }
+}
 
 const NETWORK_TOOLS = new Set(["web_search", "github_search", "fetch_url"]);
 

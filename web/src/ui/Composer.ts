@@ -1,7 +1,10 @@
+import { suggestAgentProfiles } from "../agents/mention-parser";
+import type { AgentProfile } from "../agents/types";
 import { h } from "./dom";
 
 export type ComposerModel = {
   attachments: string[]; // data URLs
+  agentProfiles: AgentProfile[];
   agentMode: boolean;
   running: boolean;
 };
@@ -15,6 +18,11 @@ export type ComposerCallbacks = {
 
 export function createComposer(cb: ComposerCallbacks) {
   const attachmentsEl = h("div", { className: "composer__attachments" });
+  const mentionMenu = h("div", {
+    className: "composer__mention-menu",
+    role: "listbox",
+    hidden: true,
+  });
 
   const fileInput = h("input", {
     type: "file",
@@ -46,20 +54,115 @@ export function createComposer(cb: ComposerCallbacks) {
     h("span", { className: "composer__submit-label" }, "发送"),
   ) as HTMLButtonElement;
 
+  let currentAttachments: string[] = [];
+  let currentProfiles: AgentProfile[] = [];
+  let suggestions: AgentProfile[] = [];
+  let activeSuggestion = 0;
+  let running = false;
+
   const autoGrow = () => {
     textarea.style.height = "auto";
     textarea.style.height = Math.min(textarea.scrollHeight, 220) + "px";
   };
-  textarea.addEventListener("input", autoGrow);
+
+  const hideMentionMenu = () => {
+    mentionMenu.hidden = true;
+    mentionMenu.replaceChildren();
+    suggestions = [];
+    activeSuggestion = 0;
+  };
+
+  const chooseProfile = (profile: AgentProfile) => {
+    textarea.value = `@${profile.name} `;
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    hideMentionMenu();
+    autoGrow();
+    textarea.focus();
+  };
+
+  const setActiveSuggestion = (index: number) => {
+    activeSuggestion = index;
+    Array.from(mentionMenu.children).forEach((child, childIndex) => {
+      child.classList.toggle("is-active", childIndex === index);
+      child.setAttribute("aria-selected", childIndex === index ? "true" : "false");
+    });
+  };
+
+  const renderMentionMenu = () => {
+    const token = textarea.value.trimStart();
+    if (running || !/^[@＠][^\s:：]*$/u.test(token)) {
+      hideMentionMenu();
+      return;
+    }
+    suggestions = suggestAgentProfiles(token, currentProfiles, 8);
+    if (!suggestions.length) {
+      hideMentionMenu();
+      return;
+    }
+    activeSuggestion = Math.min(activeSuggestion, suggestions.length - 1);
+    mentionMenu.replaceChildren(
+      ...suggestions.map((profile, index) => {
+        const option = h(
+          "button",
+          {
+            className: `mention-option${index === activeSuggestion ? " is-active" : ""}`,
+            type: "button",
+            role: "option",
+            ariaSelected: index === activeSuggestion ? "true" : "false",
+          },
+          h(
+            "span",
+            { className: "mention-option__identity" },
+            h("strong", {}, profile.displayName),
+            h("span", {}, `@${profile.name}`),
+          ),
+          h("span", { className: "mention-option__description" }, profile.description),
+        );
+        option.addEventListener("mousedown", (event) => event.preventDefault());
+        option.addEventListener("click", () => chooseProfile(profile));
+        option.addEventListener("mouseenter", () => setActiveSuggestion(index));
+        return option;
+      }),
+    );
+    mentionMenu.hidden = false;
+  };
+
+  textarea.addEventListener("input", () => {
+    autoGrow();
+    activeSuggestion = 0;
+    renderMentionMenu();
+  });
+  textarea.addEventListener("focus", renderMentionMenu);
+  textarea.addEventListener("blur", () => {
+    window.setTimeout(hideMentionMenu, 120);
+  });
   textarea.addEventListener("keydown", (e) => {
+    if (!mentionMenu.hidden && suggestions.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const direction = e.key === "ArrowDown" ? 1 : -1;
+        activeSuggestion = (
+          activeSuggestion + direction + suggestions.length
+        ) % suggestions.length;
+        setActiveSuggestion(activeSuggestion);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        chooseProfile(suggestions[activeSuggestion]!);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        hideMentionMenu();
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       trigger();
     }
   });
-
-  let currentAttachments: string[] = [];
-  let running = false;
 
   const trigger = () => {
     if (running) {
@@ -70,6 +173,7 @@ export function createComposer(cb: ComposerCallbacks) {
     if (!text && !currentAttachments.length) return;
     cb.onSubmit(text, currentAttachments.slice());
     textarea.value = "";
+    hideMentionMenu();
     autoGrow();
   };
   submitBtn.addEventListener("click", trigger);
@@ -90,7 +194,11 @@ export function createComposer(cb: ComposerCallbacks) {
     }
   });
 
-  const hint = h("div", { className: "composer__hint" }, "Enter 发送 · Shift+Enter 换行");
+  const hint = h(
+    "div",
+    { className: "composer__hint" },
+    "输入 @ 选择 Agent · Enter 发送 · Shift+Enter 换行",
+  );
 
   const el = h(
     "footer",
@@ -98,17 +206,23 @@ export function createComposer(cb: ComposerCallbacks) {
     attachmentsEl,
     h(
       "div",
-      { className: "composer__row" },
-      imgBtn,
-      fileInput,
-      textarea,
-      submitBtn,
+      { className: "composer__shell" },
+      mentionMenu,
+      h(
+        "div",
+        { className: "composer__row" },
+        imgBtn,
+        fileInput,
+        textarea,
+        submitBtn,
+      ),
     ),
     hint,
   );
 
   function update(m: ComposerModel) {
     currentAttachments = m.attachments;
+    currentProfiles = m.agentProfiles.filter((profile) => profile.enabled);
     // attachments
     attachmentsEl.textContent = "";
     for (let i = 0; i < m.attachments.length; i++) {
@@ -125,6 +239,7 @@ export function createComposer(cb: ComposerCallbacks) {
     attachmentsEl.hidden = m.attachments.length === 0;
 
     running = m.running;
+    if (running) hideMentionMenu();
     submitBtn.classList.toggle("is-stop", m.running);
     submitBtn.querySelector(".composer__submit-label")!.textContent = m.running ? "停止" : "发送";
 

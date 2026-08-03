@@ -8,6 +8,7 @@ export type HeaderModel = {
   agentMode: boolean;
   sessionId: string;
   sessions: Array<{ id: string; title: string }>;
+  agentCount: number;
   memoryCount: number;
   skillCount: number;
   running: boolean;
@@ -21,6 +22,7 @@ export type HeaderCallbacks = {
   onRefresh: () => void;
   onSessionChange: (id: string) => void;
   onNewSession: () => void;
+  onManageAgents: () => void;
   onManageMemory: () => void;
   onManageSkills: () => void;
 };
@@ -65,6 +67,12 @@ export function createHeader(cb: HeaderCallbacks) {
     { className: "icon-btn ghost", title: "创建隔离的新会话", onClick: cb.onNewSession },
     h("span", {}, "＋ 新会话"),
   );
+  const agentsBtn = h(
+    "button",
+    { className: "icon-btn ghost", title: "创建和管理 Agent 角色", onClick: cb.onManageAgents },
+    "Agents ",
+    h("span", { className: "header-count", dataset: { role: "agent-count" } }, "0"),
+  );
   const memoryBtn = h(
     "button",
     { className: "icon-btn ghost", title: "管理长期记忆", onClick: cb.onManageMemory },
@@ -103,6 +111,7 @@ export function createHeader(cb: HeaderCallbacks) {
       { className: "app-header__actions" },
       sessionSelect,
       sessionBtn,
+      agentsBtn,
       memoryBtn,
       skillsBtn,
       agentToggle,
@@ -136,8 +145,10 @@ export function createHeader(cb: HeaderCallbacks) {
     sessionSelect.value = m.sessionId;
     sessionSelect.disabled = m.running;
     sessionBtn.disabled = m.running;
+    const agentCount = el.querySelector<HTMLElement>('[data-role="agent-count"]')!;
     const memoryCount = el.querySelector<HTMLElement>('[data-role="memory-count"]')!;
     const skillCount = el.querySelector<HTMLElement>('[data-role="skill-count"]')!;
+    agentCount.textContent = String(m.agentCount);
     memoryCount.textContent = String(m.memoryCount);
     skillCount.textContent = String(m.skillCount);
     dot.dataset.state = m.status.state;

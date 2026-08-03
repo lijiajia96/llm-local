@@ -3,6 +3,7 @@ import type { ToolDefinition } from "./tools";
 export type PromptContext = {
   memory?: string;
   skills?: string;
+  role?: string;
 };
 
 export function buildReactSystemPrompt(
@@ -19,8 +20,11 @@ export function buildReactSystemPrompt(
   const memorySection = context.memory
     ? `\nRelevant durable memory:\n${context.memory}\n`
     : "";
+  const roleSection = context.role
+    ? `\nAssigned role:\n${context.role}\n`
+    : "";
   return `You are an autonomous agent that solves the user's task using tools.
-${skillSection}${memorySection}
+${roleSection}${skillSection}${memorySection}
 
 Available tools:
 ${toolList}

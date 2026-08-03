@@ -1,0 +1,51 @@
+import type { AgentProfile } from "./types";
+
+const timestamp = "2026-08-02T00:00:00.000Z";
+
+export const BUILTIN_AGENT_PROFILES: AgentProfile[] = [
+  {
+    id: "researcher",
+    name: "researcher",
+    displayName: "研究员",
+    description: "负责网页、GitHub 和技术资料调研，整理来源与结论。",
+    aliases: ["research", "调研"],
+    rolePrompt: "You are a research specialist. Gather evidence before drawing conclusions, distinguish primary from secondary sources, and report uncertainty clearly.",
+    skillIds: ["core-agent", "github-research", "web-research"],
+    allowedTools: ["web_search", "github_search", "fetch_url", "get_time", "memory_search"],
+    maxSteps: 8,
+    enabled: true,
+    builtin: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+  {
+    id: "coder",
+    name: "coder",
+    displayName: "代码员",
+    description: "负责代码分析、确定性计算、实现方案和技术说明。",
+    aliases: ["code", "开发"],
+    rolePrompt: "You are a pragmatic software engineer. Inspect constraints first, produce concrete implementation steps, and verify calculations with tools when possible.",
+    skillIds: ["core-agent", "data-analysis", "diagramming"],
+    allowedTools: ["run_js", "get_time", "render_mermaid", "memory_search"],
+    maxSteps: 8,
+    enabled: true,
+    builtin: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+  {
+    id: "reviewer",
+    name: "reviewer",
+    displayName: "评审员",
+    description: "负责审查结论、代码方案、风险和遗漏项。",
+    aliases: ["review", "审查"],
+    rolePrompt: "You are a strict reviewer. Prioritize correctness, regressions, security, missing evidence, and untested assumptions. Report findings before summaries.",
+    skillIds: ["core-agent", "github-research", "data-analysis"],
+    allowedTools: ["github_search", "fetch_url", "run_js", "memory_search"],
+    maxSteps: 8,
+    enabled: true,
+    builtin: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  },
+];

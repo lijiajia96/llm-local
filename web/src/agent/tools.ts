@@ -17,9 +17,13 @@ export type ToolDefinition = {
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
 
-async function fetchWithTimeout(url: string, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = TOOL_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TOOL_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (err) {
@@ -37,6 +41,44 @@ function format(v: unknown): string {
     try { return JSON.stringify(v); } catch { return String(v); }
   }
   return String(v);
+}
+
+function plainText(html: string): string {
+  return new DOMParser()
+    .parseFromString(html, "text/html")
+    .body.textContent?.replace(/\s+/g, " ")
+    .trim() ?? "";
+}
+
+async function searchRss(url: string, source: string): Promise<ToolResult> {
+  const res = await fetchWithTimeout(url);
+  if (!res.ok) throw new Error(`${source} RSS HTTP ${res.status}`);
+  const xml = new DOMParser().parseFromString(await res.text(), "text/xml");
+  if (xml.querySelector("parsererror")) throw new Error(`${source} RSS parse failed`);
+  const items = Array.from(xml.querySelectorAll("item")).slice(0, 6).map((item, index) => {
+    const title = item.querySelector("title")?.textContent?.trim() || "(untitled)";
+    const link = item.querySelector("link")?.textContent?.trim() || "";
+    const description = plainText(item.querySelector("description")?.textContent ?? "");
+    const published = item.querySelector("pubDate")?.textContent?.trim() || "(unknown)";
+    return [
+      `${index + 1}. ${title}`,
+      `Published: ${published}`,
+      `URL: ${link}`,
+      description ? `Summary: ${description}` : "",
+    ].filter(Boolean).join("\n");
+  });
+  if (!items.length) throw new Error(`${source} RSS returned no results`);
+  return { text: clip(`${source} RSS results:\n\n${items.join("\n\n")}`, 4000) };
+}
+
+async function fallbackWebSearch(query: string): Promise<ToolResult> {
+  if (/\bbbc\b/i.test(query)) {
+    return await searchRss("/api/bbc-news", "BBC News");
+  }
+  return await searchRss(
+    `/api/bing-search?q=${encodeURIComponent(query)}&format=rss`,
+    "Bing Search",
+  );
 }
 
 type GitHubRepo = {
@@ -162,12 +204,17 @@ const webSearch: ToolDefinition = {
     const q = String(args.query ?? "").trim();
     if (!q) throw new Error("query required");
     if (/\bgithub\b|github\.com/i.test(q)) return await searchGitHub(q);
-    const res = await fetchWithTimeout(
-      `https://s.jina.ai/${encodeURIComponent(q)}`,
-      { headers: { Accept: "text/plain" } },
-    );
-    if (!res.ok) throw new Error(`search HTTP ${res.status}`);
-    return { text: clip(await res.text(), 3500) };
+    try {
+      const res = await fetchWithTimeout(
+        `https://s.jina.ai/${encodeURIComponent(q)}`,
+        { headers: { Accept: "text/plain" } },
+        8_000,
+      );
+      if (!res.ok) throw new Error(`search HTTP ${res.status}`);
+      return { text: clip(await res.text(), 3500) };
+    } catch {
+      return await fallbackWebSearch(q);
+    }
   },
 };
 
@@ -194,6 +241,7 @@ const fetchUrl: ToolDefinition = {
     const res = await fetchWithTimeout(
       `https://r.jina.ai/${url}`,
       { headers: { Accept: "text/plain" } },
+      8_000,
     );
     if (!res.ok) throw new Error(`fetch HTTP ${res.status}`);
     return { text: clip(await res.text(), 4000) };

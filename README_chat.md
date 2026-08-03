@@ -48,6 +48,12 @@ web/
     ├── api/
     │   ├── openai.ts          # streamChat / listModels
     │   └── stream.ts          # SSE 解析
+    ├── agents/
+    │   ├── types.ts           # 角色、任务、进度和 Scheduler 事件
+    │   ├── builtins.ts        # 研究员、代码员和评审员
+    │   ├── repository.ts      # Agent Profile 持久化
+    │   ├── mention-parser.ts  # @角色路由解析与自动补全候选
+    │   └── scheduler.ts       # 有界并发、排队、进度和取消
     ├── agent/
     │   ├── context.ts         # Memory + Skills 上下文装配
     │   ├── prompt.ts          # ReAct system prompt
@@ -99,10 +105,12 @@ web/
 | 状态圆点 | 绿=已连接，红=失败，灰=未连接 |
 | 服务地址 | 默认 `http://127.0.0.1:8000/v1`，可通过 `VITE_VLLM_BASE_URL` 配置；改动自动重连并保存到 localStorage |
 | 模型下拉 | 拉取 `/v1/models` 结果 |
+| Agents | 创建、启停和删除 Agent 角色，配置 Prompt、Skills 与工具权限 |
+| Tasks | 展示子 Agent 的排队、运行步骤、工具调用、结果和失败状态 |
 | Memory | 查看统计、搜索、手工新增、删除或清空长期记忆 |
 | Skills | 启停内置 Skill、创建/删除自定义 Skill、配置工具权限 |
 | Agent 模式开关 | 开 = ReAct 工具调用；关 = 普通聊天 |
-| 输入框 | Enter 发送，Shift+Enter 换行；Cmd/Ctrl+V 可粘贴图片 |
+| 输入框 | 输入 `@` 选择 Agent；Enter 发送，Shift+Enter 换行；Cmd/Ctrl+V 可粘贴图片 |
 
 ---
 
@@ -124,7 +132,7 @@ Final Answer: <answer>
 
 | 名称 | 说明 |
 |---|---|
-| `web_search` | 通用查询走 Jina Reader；GitHub 查询自动切换 GitHub REST API |
+| `web_search` | 优先使用 Jina；超时后 BBC 查询回退到官方 RSS，其他查询回退到 Bing RSS；GitHub 查询走 GitHub REST API |
 | `github_search` | 查询 GitHub 仓库、最新稳定 tag 和 release |
 | `fetch_url` | 通用 URL 走 Jina Reader；GitHub 仓库 URL 自动切换 GitHub REST API |
 | `run_js` | 沙盒 JS 执行（`new Function`），支持 `return x;` / 单表达式 / 语句尾自动 return |
@@ -134,6 +142,21 @@ Final Answer: <answer>
 | `memory_save` | 保存稳定的用户偏好或事实 |
 
 添加新工具：在 [src/agent/tools.ts](./web/src/agent/tools.ts) 里追加一条 `ToolDefinition`，`prompt` 会自动把它的 `desc` 和 `args` 注入 system prompt。
+
+网络熔断只统计真正执行且失败的网络请求，duplicate guard 等本地策略拦截不计入失败次数。熔断、重复调用或格式异常时，Runner 会进入无工具的最终回答合成阶段，不会把原始 `Observation` 错误文本发布给用户。
+
+多 Agent 第一阶段基础模块已实现：
+
+- `parseAgentMention()`：解析输入开头的 `@角色`，支持名称、显示名、别名、全角 `＠` 和冒号分隔；普通正文中的 `@` 不触发任务。
+- `suggestAgentProfiles()`：为后续输入框角色自动补全提供候选。
+- `AgentTaskScheduler`：默认最多并行 3 个任务，支持排队、独立 `AbortController`、实时进度、订阅、取消和 `waitForIdle()`。
+- `AgentProfileRepository`：提供三个内置角色，并把自定义角色持久化到 IndexedDB。
+- 页头 `Agents` 入口：可创建角色并配置 `@名称`、别名、Role Prompt、模型、最大步数、Skills 和工具权限。
+- Composer mention 菜单：输入 `@` 或 `＠` 展示已启用角色，支持名称/显示名/别名过滤、方向键、Enter 和 Escape。
+- `@角色 任务` 会提交到最多 3 并发的 Scheduler，并自动打开独立的 Tasks 面板；每张任务卡可查看实时耗时、流式输出心跳、步骤、结果或单独停止。连续 15 秒没有新事件时会显示“无新输出”。
+- 子 Agent 成功完成后，最终输出会以带角色标识的助手消息追加到任务所属主会话并持久化；失败和取消只保留在 Tasks 面板。
+
+角色 mention、Scheduler、独立 `runAgent()` 和 Tasks 状态面板已接通。子 Agent 不占用主对话的 `running` 状态，可以继续提交其他角色任务。当前任务列表只保存在页面内存中，刷新页面会清空。
 
 ---
 

@@ -1,3 +1,5 @@
+import type { AgentProfileRepository } from "../agents/repository";
+import type { AgentProfile, AgentProfileInput } from "../agents/types";
 import type { MemoryRepository } from "../memory/repository";
 import type { EmbeddingStatus } from "../memory/embedding";
 import type { MemoryKind, MemoryRecord, MemoryScope } from "../memory/types";
@@ -5,7 +7,7 @@ import type { SkillRepository } from "../skills/repository";
 import type { SkillManifest } from "../skills/types";
 import { h } from "./dom";
 
-type ManagerTab = "memory" | "skills";
+type ManagerTab = "agents" | "memory" | "skills";
 
 export type AgentManagerCallbacks = {
   onChanged: () => void;
@@ -28,6 +30,7 @@ function empty(text: string): HTMLElement {
 export function createAgentManager(
   memory: MemoryRepository,
   skills: SkillRepository,
+  agents: AgentProfileRepository,
   availableTools: string[],
   cb: AgentManagerCallbacks,
 ) {
@@ -38,6 +41,7 @@ export function createAgentManager(
   const body = h("div", { className: "manager__body" });
   const memoryTab = h("button", { className: "manager-tab" }, "Memory");
   const skillsTab = h("button", { className: "manager-tab" }, "Skills");
+  const agentsTab = h("button", { className: "manager-tab" }, "Agents");
   const close = h("button", { className: "manager__close", title: "关闭" }, "×");
   const panel = h(
     "aside",
@@ -46,7 +50,7 @@ export function createAgentManager(
       "header",
       { className: "manager__header" },
       title,
-      h("div", { className: "manager-tabs" }, memoryTab, skillsTab),
+      h("div", { className: "manager-tabs" }, agentsTab, memoryTab, skillsTab),
       close,
     ),
     body,
@@ -76,6 +80,7 @@ export function createAgentManager(
   });
   memoryTab.addEventListener("click", () => { activeTab = "memory"; void render(); });
   skillsTab.addEventListener("click", () => { activeTab = "skills"; void render(); });
+  agentsTab.addEventListener("click", () => { activeTab = "agents"; void render(); });
 
   async function renderMemory() {
     const [records, stats] = await Promise.all([memory.list(), memory.stats()]);
@@ -399,12 +404,189 @@ export function createAgentManager(
     return details;
   }
 
+  async function renderAgents() {
+    const [profiles, manifests] = await Promise.all([agents.list(), skills.list()]);
+    const enabled = profiles.filter((profile) => profile.enabled).length;
+    const reset = h("button", { className: "manager-btn" }, "重置内置角色");
+    reset.addEventListener("click", async () => {
+      await agents.resetBuiltins();
+      cb.onChanged();
+      await renderAgents();
+    });
+    const list = h("div", { className: "manager-list" });
+    for (const profile of profiles) list.append(agentCard(profile));
+    body.replaceChildren(
+      h(
+        "div",
+        { className: "manager-toolbar" },
+        h("div", { className: "manager-summary" }, `${enabled}/${profiles.length} 个角色已启用`),
+        reset,
+      ),
+      agentForm(manifests, async (input) => {
+        await agents.save(input);
+        cb.onChanged();
+        await renderAgents();
+      }),
+      h("div", { className: "manager-section-title" }, "Agent Profiles"),
+      list,
+    );
+  }
+
+  function agentCard(profile: AgentProfile) {
+    const toggle = h("input", { type: "checkbox", checked: profile.enabled }) as HTMLInputElement;
+    toggle.addEventListener("change", async () => {
+      await agents.setEnabled(profile.id, toggle.checked);
+      cb.onChanged();
+      await renderAgents();
+    });
+    const actions: Node[] = [
+      h("label", { className: "mini-switch" }, toggle, h("span", {})),
+    ];
+    if (!profile.builtin) {
+      const remove = h("button", { className: "manager-card__delete" }, "删除");
+      remove.addEventListener("click", async () => {
+        await agents.remove(profile.id);
+        cb.onChanged();
+        await renderAgents();
+      });
+      actions.push(remove);
+    }
+    return h(
+      "article",
+      { className: `manager-card agent-profile-card${profile.enabled ? "" : " is-disabled"}` },
+      h(
+        "div",
+        { className: "manager-card__head" },
+        h("span", { className: "skill-icon" }, profile.builtin ? "●" : "○"),
+        h("strong", {}, profile.displayName),
+        h("span", { className: "manager-card__meta" }, `@${profile.name}`),
+        h("span", { className: "manager-card__meta" }, `${profile.maxSteps} steps`),
+        ...actions,
+      ),
+      h("div", { className: "manager-card__content" }, profile.description),
+      h("div", { className: "skill-prompt" }, profile.rolePrompt),
+      h(
+        "div",
+        { className: "manager-card__foot" },
+        ...(profile.aliases ?? []).map((alias) =>
+          h("span", { className: "manager-chip" }, `@${alias}`),
+        ),
+        ...profile.skillIds.map((skill) =>
+          h("span", { className: "manager-chip skill" }, skill),
+        ),
+        profile.model
+          ? h("span", { className: "manager-chip" }, `model: ${profile.model}`)
+          : "",
+      ),
+      h(
+        "div",
+        { className: "skill-tools" },
+        "Tools: ",
+        profile.allowedTools.join(", ") || "(none)",
+      ),
+    );
+  }
+
+  function agentForm(
+    manifests: SkillManifest[],
+    onSave: (input: AgentProfileInput) => Promise<void>,
+  ) {
+    const details = h("details", { className: "manager-form" });
+    const name = h("input", { placeholder: "researcher（用于 @researcher）" }) as HTMLInputElement;
+    const displayName = h("input", { placeholder: "研究员" }) as HTMLInputElement;
+    const description = h("input", { placeholder: "角色职责说明" }) as HTMLInputElement;
+    const aliases = h("input", { placeholder: "别名，用逗号分隔" }) as HTMLInputElement;
+    const model = h("input", { placeholder: "留空则使用当前模型" }) as HTMLInputElement;
+    const maxSteps = h("input", {
+      type: "number",
+      min: "1",
+      max: "20",
+      value: "8",
+    }) as HTMLInputElement;
+    const rolePrompt = h("textarea", {
+      rows: 5,
+      placeholder: "该角色的职责、工作方式和输出要求",
+    }) as HTMLTextAreaElement;
+
+    const skillChecks = new Map<string, HTMLInputElement>();
+    const skillsEl = h("div", { className: "manager-tool-grid" });
+    for (const skill of manifests) {
+      const check = h("input", {
+        type: "checkbox",
+        checked: skill.always,
+        disabled: skill.always,
+      }) as HTMLInputElement;
+      skillChecks.set(skill.id, check);
+      skillsEl.append(h("label", {}, check, h("span", {}, skill.name)));
+    }
+
+    const toolChecks = new Map<string, HTMLInputElement>();
+    const toolsEl = h("div", { className: "manager-tool-grid" });
+    for (const tool of availableTools) {
+      const check = h("input", { type: "checkbox" }) as HTMLInputElement;
+      toolChecks.set(tool, check);
+      toolsEl.append(h("label", {}, check, h("span", {}, tool)));
+    }
+
+    const save = h("button", { className: "manager-btn primary", type: "button" }, "创建角色");
+    save.addEventListener("click", async () => {
+      if (!name.value.trim() || !displayName.value.trim() || !description.value.trim() || !rolePrompt.value.trim()) {
+        return;
+      }
+      save.setAttribute("disabled", "");
+      try {
+        await onSave({
+          name: name.value,
+          displayName: displayName.value,
+          description: description.value,
+          aliases: aliases.value.split(","),
+          rolePrompt: rolePrompt.value,
+          model: model.value || undefined,
+          skillIds: [...skillChecks]
+            .filter(([, check]) => check.checked)
+            .map(([skill]) => skill),
+          allowedTools: [...toolChecks]
+            .filter(([, check]) => check.checked)
+            .map(([tool]) => tool),
+          maxSteps: Number(maxSteps.value),
+          enabled: true,
+        });
+      } finally {
+        save.removeAttribute("disabled");
+      }
+    });
+    details.append(
+      h("summary", {}, "＋ 创建自定义角色"),
+      h(
+        "div",
+        { className: "manager-form__grid" },
+        field("@ 名称", name),
+        field("显示名称", displayName),
+        field("职责说明", description),
+        field("别名", aliases),
+        field("指定模型", model),
+        field("最大步数", maxSteps),
+        field("Role Prompt", rolePrompt),
+        field("Skills", skillsEl),
+        field("工具权限", toolsEl),
+      ),
+      save,
+    );
+    return details;
+  }
+
   async function render() {
+    agentsTab.classList.toggle("is-active", activeTab === "agents");
     memoryTab.classList.toggle("is-active", activeTab === "memory");
     skillsTab.classList.toggle("is-active", activeTab === "skills");
-    title.textContent = activeTab === "memory" ? "Memory 管理" : "Skills 管理";
+    title.textContent = activeTab === "agents"
+      ? "Agents 管理"
+      : activeTab === "memory"
+        ? "Memory 管理"
+        : "Skills 管理";
     body.replaceChildren(h("div", { className: "manager-loading" }, "加载中…"));
-    if (activeTab === "memory") await renderMemory();
+    if (activeTab === "agents") await renderAgents();
+    else if (activeTab === "memory") await renderMemory();
     else await renderSkills();
   }
 

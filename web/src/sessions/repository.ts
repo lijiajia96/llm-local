@@ -77,6 +77,26 @@ export class SessionRepository {
     return record;
   }
 
+  async appendMessage(id: string, message: ChatMessage): Promise<SessionRecord> {
+    const db = await openDatabase();
+    const tx = db.transaction(STORES.sessions, "readwrite");
+    const store = tx.objectStore(STORES.sessions);
+    const current = await requestResult(store.get(id)) as SessionRecord | undefined;
+    const now = new Date().toISOString();
+    const history = [...(current?.history ?? []), structuredClone(message)];
+    const record: SessionRecord = {
+      id,
+      title: titleFromHistory(history),
+      history,
+      agentMode: current?.agentMode ?? true,
+      createdAt: current?.createdAt ?? now,
+      updatedAt: now,
+    };
+    store.put(record);
+    await transactionDone(tx);
+    return record;
+  }
+
   private async put(record: SessionRecord): Promise<void> {
     const db = await openDatabase();
     const tx = db.transaction(STORES.sessions, "readwrite");

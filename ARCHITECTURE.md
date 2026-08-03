@@ -1,6 +1,6 @@
 # vLLM Chat Agent 架构
 
-> 最后同步：2026-08-01
+> 最后同步：2026-08-02
 >
 > 架构源码：`web/src/`
 >
@@ -88,6 +88,10 @@ flowchart TB
     end
 
     subgraph Domain["领域与运行时"]
+        AgentTypes[agents/types]
+        AgentProfiles[agents/repository]
+        MentionParser[agents/mention-parser]
+        Scheduler[agents/scheduler]
         AgentContext[agent/context]
         Runner[agent/runner]
         Prompt[agent/prompt]
@@ -112,6 +116,9 @@ flowchart TB
     Main --> UI
     Main --> AgentContext
     Main --> Runner
+    Main --> AgentProfiles
+    Main --> MentionParser
+    Main --> Scheduler
     Main --> MemoryRepo
     Main --> SkillRepo
     Main --> SessionRepo
@@ -133,6 +140,8 @@ flowchart TB
     MemoryRepo --> Embedding
     Embedding --> Worker
     SkillRepo --> Database
+    AgentProfiles --> Database
+    Scheduler --> Runner
 ```
 
 依赖规则：
@@ -143,6 +152,8 @@ flowchart TB
 4. `api/*` 只处理 OpenAI 兼容协议和 SSE。
 5. `main.ts` 是唯一 Composition Root，负责装配和可变应用状态。
 6. Tool 权限必须由本次激活 Skills 生成的注册表控制，不能只依赖 prompt。
+
+`agents/mention-parser.ts` 和 `agents/scheduler.ts` 是无 UI、无存储依赖的基础层；`agents/repository.ts` 负责 Agent Profile 的 IndexedDB 持久化。
 
 ## 4. 应用状态
 
@@ -251,6 +262,54 @@ flowchart LR
 - `memoryPrompt`：格式化后的长期记忆；
 - `skillPrompt`：Skill 指令、触发词和工具权限。
 
+### 多 Agent 基础模块
+
+```mermaid
+flowchart LR
+    Input[主输入文本]
+    Parser[parseAgentMention]
+    Normal[普通主对话]
+    Unknown[未知角色提示]
+    Scheduler[AgentTaskScheduler]
+    Queue[有界并发队列]
+    RunnerA[Task Runner A]
+    RunnerB[Task Runner B]
+    Events[任务状态与进度事件]
+    Subscribers[未来 UI / 持久层订阅者]
+
+    Input --> Parser
+    Parser -->|none| Normal
+    Parser -->|unknown| Unknown
+    Parser -->|matched| Scheduler
+    Scheduler --> Queue
+    Queue --> RunnerA
+    Queue --> RunnerB
+    RunnerA --> Events
+    RunnerB --> Events
+    Events --> Subscribers
+```
+
+当前已实现：
+
+- `agents/types.ts`：`AgentProfile`、`AgentTask`、进度和 Scheduler 事件契约；
+- `agents/builtins.ts`：研究员、代码员和评审员三个内置角色；
+- `agents/repository.ts`：内置覆盖、自定义角色、启停、删除和 IndexedDB 持久化；
+- `agents/mention-parser.ts`：只解析消息开头的路由 mention，支持角色名称、显示名、别名、`@/＠` 和 `:/：`；
+- `agents/scheduler.ts`：默认并发上限 3，每任务独立 `AbortController`，支持排队、进度、订阅、取消、清理和等待空闲；
+- Scheduler 通过 `AgentTaskRunner` 注入执行器，不直接依赖 ReAct runner。
+
+Agent Profile 管理 UI 已接入页头 `Agents` 入口；Composer 输入 `@` 时使用 `suggestAgentProfiles()` 展示和过滤角色候选。发送 `@角色 任务` 后，`parseAgentMention()` 将任务提交给 Scheduler，Scheduler 注入独立 `runAgent()` 并由 TaskWorkspace 展示进度。
+
+运行约束：
+
+- Scheduler 默认最多并行 3 个任务，超出后排队；
+- 每个任务有独立 `AbortController`、角色 Prompt、最大步数和工具白名单；
+- TaskWorkspace 每秒刷新运行耗时，并将模型流式 token 节流为可见心跳；连续 15 秒无事件时标记“无新输出”；
+- 任务捕获提交时的 `sessionId`，Memory 不随主会话切换而串写；
+- 成功结果幂等发布到任务所属会话的主聊天历史；若用户已切换会话，则通过 SessionRepository 原子追加到原会话；
+- 子 Agent 不修改主聊天 `running` 状态，Composer 可继续提交其他任务；
+- 当前任务和进度只保存在页面内存中，刷新后不恢复。
+
 ## 7. ReAct Agent 循环
 
 ```mermaid
@@ -267,28 +326,33 @@ flowchart TD
     Observe[追加 Observation]
     Failure{网络连续失败 2 次?}
     Limit{达到 8 Steps?}
+    Synthesize[无工具最终回答合成<br/>过滤 runtime error]
     Done[返回最终答案]
     Stop[返回 null / 错误事件]
 
     Start --> Prompt --> Step --> Parse --> Final
     Final -- 是 --> Done
     Final -- 否 --> Action
-    Action -- 否 --> Done
+    Action -- 否 --> Synthesize
     Action -- 是 --> Duplicate
     Duplicate -- 是 --> Observe
     Duplicate -- 否 --> Circuit
     Circuit -- 是 --> Observe
     Circuit -- 否 --> Execute --> Observe
     Observe --> Failure
-    Failure -- 是 --> Observe
+    Failure -- 是 --> Synthesize
     Failure -- 否 --> Limit
     Limit -- 否 --> Step
-    Limit -- 是 --> Stop
+    Limit -- 是 --> Synthesize
+    Synthesize --> Done
+    Synthesize -. 合成失败 .-> Stop
 ```
 
 Runner 的硬约束：
 
 - 每个 step 只执行一个 Action；
+- duplicate 等本地策略拦截不计入网络失败，只有真正执行且失败的网络请求参与熔断计数；
+- 熔断、重复调用或格式异常进入独立最终回答合成，禁止把原始 Observation/runtime error 当作答案；
 - 相同 `tool + normalized args` 不重复执行；
 - 未被 Skill 允许的工具不可执行；
 - 网络工具连续失败 2 次后熔断；
@@ -326,6 +390,9 @@ flowchart TB
     Web --> Router{GitHub 查询?}
     Router -- 是 --> GitHubAPI
     Router -- 否 --> JinaSearch[s.jina.ai]
+    JinaSearch -. 超时 .-> SearchFallback{BBC 查询?}
+    SearchFallback -- 是 --> BBCRSS[BBC 官方 RSS]
+    SearchFallback -- 否 --> BingRSS[Bing RSS]
     Fetch --> FetchRouter{GitHub URL?}
     FetchRouter -- 是 --> GitHubAPI
     FetchRouter -- 否 --> JinaReader[r.jina.ai]
@@ -333,7 +400,7 @@ flowchart TB
 
 | 工具 | 执行位置 | 说明 |
 |---|---|---|
-| `web_search` | 浏览器网络请求 | GitHub 查询自动路由 GitHub API，否则使用 Jina |
+| `web_search` | 浏览器网络请求 + Vite 固定代理 | GitHub 查询走 GitHub API；Jina 超时后回退 BBC/Bing RSS |
 | `github_search` | 浏览器网络请求 | 仓库、tag、release、更新时间 |
 | `fetch_url` | 浏览器网络请求 | GitHub URL 自动转 API，否则使用 Jina Reader |
 | `run_js` | 浏览器主线程 | `new Function`，无 DOM/网络注入 |
@@ -584,6 +651,22 @@ erDiagram
         datetime updatedAt
     }
 
+    AGENT_PROFILE {
+        string id PK
+        string name
+        string displayName
+        string_array aliases
+        string rolePrompt
+        string model
+        string_array skillIds
+        string_array allowedTools
+        int maxSteps
+        boolean enabled
+        boolean builtin
+        datetime createdAt
+        datetime updatedAt
+    }
+
     SESSION ||--o{ MEMORY : owns
     MEMORY ||--o| MEMORY : supersedes
 ```
@@ -593,11 +676,12 @@ IndexedDB：
 | 配置 | 值 |
 |---|---|
 | 数据库 | `vllm-agent` |
-| 当前版本 | `3` |
-| Object Store | `memories`、`skills`、`sessions` |
+| 当前版本 | `4` |
+| Object Store | `memories`、`skills`、`sessions`、`agentProfiles` |
 | Memory 索引 | `kind`、`updatedAt`、`namespace`、`validTo` |
 | Skill 索引 | `enabled`、`updatedAt` |
 | Session 索引 | `updatedAt` |
+| Agent Profile 索引 | `enabled`、`updatedAt` |
 
 注意：IndexedDB 按 origin 隔离。`127.0.0.1:8899` 和 `127.0.0.1:8900` 拥有不同的数据。
 
@@ -621,6 +705,8 @@ flowchart TB
     SessionSelect[Session Select]
     Chat[ChatView]
     Composer[Composer]
+    MentionMenu[Mention Menu]
+    TaskWorkspace[TaskWorkspace]
     Manager[AgentManager]
     UserMsg[User Message]
     AssistantMsg[Assistant Message]
@@ -632,6 +718,8 @@ flowchart TB
     Header --> SessionSelect
     Root --> Chat
     Root --> Composer
+    Composer --> MentionMenu
+    Root --> TaskWorkspace
     Root --> Manager
     Chat --> UserMsg
     Chat --> AssistantMsg

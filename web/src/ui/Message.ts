@@ -52,3 +52,42 @@ export function createAgentMessage() {
   const row = h("div", { className: "message message--agent" }, bubble);
   return { el: row, traceHost };
 }
+
+export type SubAgentResult = {
+  agentName: string;
+  goal: string;
+  answer: string;
+};
+
+export function formatSubAgentResult(result: SubAgentResult): string {
+  const goal = result.goal.trim().replace(/\s+/g, " ");
+  return `[子 Agent：${result.agentName}]\n任务：${goal}\n结果：\n${result.answer}`;
+}
+
+export function parseSubAgentResult(content: string): SubAgentResult | null {
+  const match = content.match(
+    /^\[子 Agent：([^\]]+)\]\n任务：([^\n]*)\n结果：\n([\s\S]*)$/u,
+  );
+  if (!match) return null;
+  return {
+    agentName: match[1]!,
+    goal: match[2]!,
+    answer: match[3]!,
+  };
+}
+
+export function createSubAgentResultMessage(result: SubAgentResult) {
+  const bubble = h(
+    "div",
+    { className: "bubble bubble--sub-agent" },
+    h(
+      "div",
+      { className: "sub-agent-result__head" },
+      h("span", {}, "子 Agent"),
+      h("strong", {}, result.agentName),
+    ),
+    h("div", { className: "sub-agent-result__goal" }, result.goal),
+    h("div", { className: "sub-agent-result__answer" }, result.answer),
+  );
+  return h("div", { className: "message message--assistant message--sub-agent" }, bubble);
+}

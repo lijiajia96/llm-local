@@ -15,17 +15,35 @@ export type AgentContext = {
   skillPrompt: string;
 };
 
+export type AgentContextOptions = {
+  skillIds?: string[];
+  allowedTools?: string[];
+};
+
 export async function prepareAgentContext(
   goal: string,
   memoryRepository: MemoryRepository,
   skillRepository: SkillRepository,
+  options: AgentContextOptions = {},
 ): Promise<AgentContext> {
   const [memories, skills] = await Promise.all([
     memoryRepository.search(goal, 6),
     skillRepository.list(),
   ]);
-  const matches = matchSkills(goal, skills);
+  const dynamicMatches = matchSkills(goal, skills);
+  const explicitMatches: SkillMatch[] = skills
+    .filter((skill) => skill.enabled && options.skillIds?.includes(skill.id))
+    .map((skill) => ({ skill, score: 1, matchedTriggers: ["agent-profile"] }));
+  const matches = [...new Map(
+    [...dynamicMatches, ...explicitMatches].map((match) => [match.skill.id, match]),
+  ).values()];
   const permitted = allowedTools(matches);
+  if (options.allowedTools) {
+    const roleTools = new Set(options.allowedTools);
+    for (const tool of permitted) {
+      if (!roleTools.has(tool)) permitted.delete(tool);
+    }
+  }
   const allTools = { ...TOOLS, ...createMemoryTools(memoryRepository) };
   const tools = Object.fromEntries(
     Object.entries(allTools).filter(([name]) => permitted.has(name)),

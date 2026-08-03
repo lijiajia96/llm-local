@@ -1,10 +1,11 @@
 const DB_NAME = "vllm-agent";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export const STORES = {
   memories: "memories",
   skills: "skills",
   sessions: "sessions",
+  agentProfiles: "agentProfiles",
 } as const;
 
 let databasePromise: Promise<IDBDatabase> | null = null;
@@ -36,6 +37,11 @@ export function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.sessions)) {
         const store = db.createObjectStore(STORES.sessions, { keyPath: "id" });
+        store.createIndex("updatedAt", "updatedAt");
+      }
+      if (!db.objectStoreNames.contains(STORES.agentProfiles)) {
+        const store = db.createObjectStore(STORES.agentProfiles, { keyPath: "id" });
+        store.createIndex("enabled", "enabled");
         store.createIndex("updatedAt", "updatedAt");
       }
     };
