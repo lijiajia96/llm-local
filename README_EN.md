@@ -2,9 +2,23 @@
 
 [中文](./README.md) | **English**
 
+[![Stars](https://img.shields.io/github/stars/lijiajia96/llm-local?style=social)](https://github.com/lijiajia96/llm-local/stargazers)
+[![Forks](https://img.shields.io/github/forks/lijiajia96/llm-local?style=social)](https://github.com/lijiajia96/llm-local/network/members)
+[![Issues](https://img.shields.io/github/issues/lijiajia96/llm-local)](https://github.com/lijiajia96/llm-local/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/lijiajia96/llm-local)](https://github.com/lijiajia96/llm-local/commits/main)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
+![vLLM](https://img.shields.io/badge/vLLM-Compatible-4B8BBE)
+
 A local-first, browser-based Agent Runtime built with Vite + TypeScript, directly connected to an OpenAI-compatible vLLM. It supports SSE streaming chat, image input, ReAct Tools, Local Memory, Skills, historical sessions, and `@role` multi-agent parallel tasks.
 
 A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial covering OpenAI-compatible streaming, ReAct tools, agent memory, skills, sessions, and observable parallel agents.
+
+> ⭐ If this project helps you, please consider giving it a **Star** — it also makes this tutorial easy to find again!
+
+![Multiple Sub-Agents Running in Parallel](./docs/images/web-parallel-tasks.png)
+
+> Tip: replace the static screenshot above with an animated GIF (record the full flow from submitting an `@role` task to results being written back). A GIF converts far better than a still image.
 
 > From the first launch of vLLM to implementing a complete multi-agent Runtime: Read [From vLLM Chat to Multi-Agent Runtime: Browser-Side Agent Engineering Practice Course](./CLASS_README_EN.md).
 
@@ -231,3 +245,7 @@ Production build:
 cd web
 npm run build
 ```
+
+## Give it a Star ⭐
+
+If this project or the tutorial helps you, please consider leaving a [Star](https://github.com/lijiajia96/llm-local/stargazers). Issues, PRs, and shares are all welcome — your support keeps this project actively maintained.

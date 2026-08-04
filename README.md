@@ -2,9 +2,23 @@
 
 **中文** | [English](./README_EN.md)
 
+[![Stars](https://img.shields.io/github/stars/lijiajia96/llm-local?style=social)](https://github.com/lijiajia96/llm-local/stargazers)
+[![Forks](https://img.shields.io/github/forks/lijiajia96/llm-local?style=social)](https://github.com/lijiajia96/llm-local/network/members)
+[![Issues](https://img.shields.io/github/issues/lijiajia96/llm-local)](https://github.com/lijiajia96/llm-local/issues)
+[![Last Commit](https://img.shields.io/github/last-commit/lijiajia96/llm-local)](https://github.com/lijiajia96/llm-local/commits/main)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
+![vLLM](https://img.shields.io/badge/vLLM-Compatible-4B8BBE)
+
 一个使用 Vite + TypeScript 构建的本地优先浏览器端 Agent Runtime，直连 OpenAI 兼容 vLLM，支持 SSE 流式聊天、图片输入、ReAct Tools、Local Memory、Skills、历史会话和 `@角色` 多 Agent 并行任务。
 
 A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial covering OpenAI-compatible streaming, ReAct tools, agent memory, skills, sessions, and observable parallel agents.
+
+> ⭐ 如果这个项目对你有帮助，欢迎点亮 **Star** 支持一下，也方便你随时找回本教程！
+
+![多 Agent 并行运行演示](./docs/images/web-parallel-tasks.png)
+
+> 提示：可将上方静态截图替换为一段操作 GIF（录制 `@角色` 提交任务到结果回写的完整过程），动图对 Star 转化更友好。
 
 > 从第一次启动 vLLM，到实现完整多 Agent Runtime：阅读 [《从 vLLM Chat 到多 Agent Runtime：浏览器端智能体工程实践课》](./CLASS_README.md)。
 
@@ -233,3 +247,7 @@ VITE_VLLM_BASE_URL=http://your-vllm-host:8000/v1 npm run dev
 cd web
 npm run build
 ```
+
+## Star 一下 ⭐
+
+如果本项目或教程对你有帮助，欢迎点亮 [Star](https://github.com/lijiajia96/llm-local/stargazers)，也欢迎提 Issue、PR 或分享给需要的朋友。你的支持是持续更新的最大动力。
