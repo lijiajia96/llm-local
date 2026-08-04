@@ -1,12 +1,106 @@
-# vLLM Chat Agent
+# vLLM Chat Agent: Local-First Multi-Agent Runtime
 
-浏览器端 vLLM Chat / Agent 应用，使用 Vite + TypeScript 构建。
+**中文** | [English](./README_EN.md)
+
+一个使用 Vite + TypeScript 构建的本地优先浏览器端 Agent Runtime，直连 OpenAI 兼容 vLLM，支持 SSE 流式聊天、图片输入、ReAct Tools、Local Memory、Skills、历史会话和 `@角色` 多 Agent 并行任务。
+
+A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial covering OpenAI-compatible streaming, ReAct tools, agent memory, skills, sessions, and observable parallel agents.
+
+> 从第一次启动 vLLM，到实现完整多 Agent Runtime：阅读 [《从 vLLM Chat 到多 Agent Runtime：浏览器端智能体工程实践课》](./CLASS_README.md)。
+
+**技术主题：** vLLM、Local LLM Deployment、OpenAI Compatible API、SSE、TypeScript、ReAct Agent、Tool Calling、Agent Memory、Skills、Multi-Agent、IndexedDB、Web Worker、Transformers.js。
+
+## 快速导航
+
+- [完整中文教程](./CLASS_README.md)
+- [快速启动](#启动)
+- [核心优势](#核心优势)
+- [Web 界面示例](#web-界面示例)
+- [系统架构](./ARCHITECTURE.md)
+- [Memory 架构](./MEMORY_ARCHITECTURE.md)
+- [网页使用说明](./README_chat.md)
 
 ## 项目定位
 
 本项目是一个面向单用户的、**本地优先的浏览器端多 Agent Runtime**。它直接连接 OpenAI 兼容的私有 vLLM 服务，在不引入业务后端和独立向量数据库的情况下，提供对话、工具调用、Memory、Skills、`@角色` 并行任务和可视化运行状态。
 
 项目关注的不是替代 LangChain、AutoGen 或 CrewAI 的完整生态，而是用更短的部署链路实现一个隐私优先、过程透明、容易修改的本地 Agent 工作台。
+
+## vLLM 本地部署与多 Agent 开发教程
+
+本仓库提供一套与真实源码同步的完整中文教程：[CLASS_README.md](./CLASS_README.md)。
+
+教程面向刚接触本地大模型和 Agent 工程的开发者，从“模型文件为什么不能直接提供服务”开始，逐步讲到 vLLM 推理、OpenAI 兼容 API、SSE 流式解析、ReAct Runtime、Memory、Skills 和多 Agent Scheduler。它不是独立于代码的概念文章，每一章都包含源码入口、动手实验、验收标准和思考题。
+
+### 教程特点
+
+- **从新手视角解释 vLLM**：模型权重、Tokenizer、Prefill、Decode、KV Cache、PagedAttention、Continuous Batching、TTFT 和 TPOT；
+- **完整讲解本地模型选型**：Base/Instruct/Reasoning/VLM、Dense/MoE、显存估算、量化、上下文、并发和许可证；
+- **覆盖常见部署路径**：单 GPU、多 GPU Tensor Parallel、量化模型、Docker、远程 GPU 与生产化网关；
+- **深入 OpenAI 兼容协议**：`/models`、`/chat/completions`、messages、temperature、stop 和 Chat Template；
+- **从零解释 SSE**：`data:` 报文、`[DONE]`、Fetch、EventSource、WebSocket、UTF-8 拆包和代理缓冲；
+- **实现完整 ReAct Agent**：Thought、Action、Action Input、Observation、Final Answer 和事件驱动 Trace；
+- **权限由 Runtime 强制执行**：Skill Manifest、Tool Registry、运行时白名单、重复调用拦截和网络熔断；
+- **实现 Local Memory OS**：IndexedDB、multilingual-e5、本地 embedding、混合检索、后台巩固和时序事实；
+- **实现可观察多 Agent**：`@角色` 路由、Agent Profile、有界并发、独立取消、Tasks UI 和结果回写；
+- **提供完整实践体系**：课堂实验、故障注入、测试路线、综合项目、评分标准和上线检查表。
+
+### 学习路线
+
+```mermaid
+flowchart LR
+    A[vLLM 与模型部署] --> B[OpenAI API 与 SSE]
+    B --> C[TypeScript Chat UI]
+    C --> D[ReAct 与 Tools]
+    D --> E[Skills 权限门控]
+    E --> F[Local Memory OS]
+    F --> G[Sessions 隔离]
+    G --> H[Multi-Agent Scheduler]
+    H --> I[可观察性与生产化]
+```
+
+### 课程目录
+
+| 阶段 | 学习内容 | 对应产物 |
+|---|---|---|
+| vLLM 新手预备课 | Token、推理、KV Cache、批处理、上下文、性能指标 | 能解释一次模型请求如何执行 |
+| 本地模型选型 | 模型类型、Dense/MoE、显存、量化、许可证、本地评测 | 模型选型与容量决策表 |
+| 本地与生产部署 | 单卡、多卡、Docker、远程 GPU、TLS、鉴权和监控 | 可复现的 vLLM 服务 |
+| 第 1 章 | vLLM 服务验证与 Web 工程启动 | 可访问的本地聊天页面 |
+| 第 2 章 | Vite + TypeScript 分层与 Composition Root | 清晰的模块依赖图 |
+| 第 3 章 | OpenAI API、SSE 和 ReadableStream | 流式文本客户端 |
+| 第 4 章 | 多模态消息与无框架 UI | 文字/图片聊天界面 |
+| 第 5 章 | ReAct Agent Runtime | 可执行工具循环 |
+| 第 6 章 | Tools、Abort、超时、去重与熔断 | 可靠工具层 |
+| 第 7 章 | Skills 与 capability-based 工具门控 | Skill 驱动权限 |
+| 第 8 章 | Memory 类型、embedding、混合检索与巩固 | Local Memory OS |
+| 第 9 章 | IndexedDB Sessions 与 namespace 隔离 | 可恢复历史会话 |
+| 第 10 章 | Agent Profile、mention parser 和 Scheduler | 并行子 Agent |
+| 第 11 章 | Tasks 状态、Final Synthesis 与故障诊断 | 可观察运行界面 |
+| 第 12 章 | 自定义角色、Skill、Tool 和综合评审 | 完整课程项目 |
+
+### 教程与源码对应关系
+
+| 想学习什么 | 先读教程 | 再看源码 |
+|---|---|---|
+| vLLM 与本地模型部署 | [vLLM 新手预备课](./CLASS_README.md#vllm-新手预备课先理解模型服务) | [`test_vllm_server.py`](./test_vllm_server.py) |
+| 模型选型与容量规划 | [本地模型选型与部署指南](./CLASS_README.md#本地模型选型与部署指南) | [`web/src/config.ts`](./web/src/config.ts) |
+| OpenAI API 与 SSE | [第 3 章](./CLASS_README.md#第-3-章openai-兼容-api-与-sse-流式输出) | [`api/openai.ts`](./web/src/api/openai.ts)、[`api/stream.ts`](./web/src/api/stream.ts) |
+| ReAct Agent | [第 5 章](./CLASS_README.md#第-5-章从聊天升级为-react-agent) | [`agent/runner.ts`](./web/src/agent/runner.ts) |
+| Tools 与可靠性 | [第 6 章](./CLASS_README.md#第-6-章tools能力边界与可靠性) | [`agent/tools.ts`](./web/src/agent/tools.ts) |
+| Skills 权限门控 | [第 7 章](./CLASS_README.md#第-7-章skills-与-capability-based-工具门控) | [`skills/matcher.ts`](./web/src/skills/matcher.ts) |
+| Local Memory | [第 8 章](./CLASS_README.md#第-8-章local-memory-os) | [`memory/repository.ts`](./web/src/memory/repository.ts) |
+| 多 Agent 调度 | [第 10 章](./CLASS_README.md#第-10-章角色-与多-agent-scheduler) | [`agents/scheduler.ts`](./web/src/agents/scheduler.ts) |
+
+### 适合哪些读者
+
+- 想在本地或内网部署 vLLM，但不知道如何选择模型、显存和并行参数；
+- 会写前端或 TypeScript，希望系统学习 LLM 流式应用；
+- 使用过 Agent 框架，但希望理解 ReAct Runner、Tools 和 Scheduler 的底层实现；
+- 需要隐私优先的 Memory、Skills 和多 Agent 工作台；
+- 希望把一个 Agent Demo 演进为有权限、状态、故障处理和测试边界的真实工程。
+
+完整课程正文、实验和检查表见 [CLASS_README.md](./CLASS_README.md)。
 
 ## 核心优势
 
@@ -114,6 +208,7 @@ Scheduler 会在并发上限内同时运行任务。Tasks 面板独立展示每�
 
 ## 文档
 
+- [完整中文教程：从 vLLM 部署到多 Agent Runtime](./CLASS_README.md)
 - [使用说明](./README_chat.md)
 - [项目架构与 Mermaid 流程图](./ARCHITECTURE.md)
 - [Memory 架构](./MEMORY_ARCHITECTURE.md)
