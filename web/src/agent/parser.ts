@@ -19,6 +19,24 @@ export function normalizePreamble(text: string): string {
   return text.replace(/^\s*<think>/i, "").replace(/<\/think>\s*$/i, "").trim();
 }
 
+/**
+ * Drop `<think>` reasoning from a user-facing answer, keeping only the reply.
+ * Prefers the content after the last `</think>`; if that is empty, falls back
+ * to the text with think blocks and any stray tags removed. This keeps a stray
+ * `</think>` from ever leaking into the answer.
+ */
+export function stripThink(text: string): string {
+  const closeIdx = text.lastIndexOf("</think>");
+  if (closeIdx >= 0) {
+    const tail = text.slice(closeIdx + "</think>".length).replace(/<\/?think>/gi, "").trim();
+    if (tail) return tail;
+  }
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<\/?think>/gi, "")
+    .trim();
+}
+
 /** Parse the trace text (post-`splitStepText`) into typed blocks. */
 export function parseTrace(text: string): TraceBlock[] {
   const clean = text.replace(/\r/g, "");
@@ -65,6 +83,6 @@ export function extractPendingAction(
 }
 
 export function extractFinal(blocks: TraceBlock[]): string | null {
-  const found = blocks.find((b) => b.kind === "final_answer");
-  return found ? found.text : null;
+  const found = [...blocks].reverse().find((b) => b.kind === "final_answer");
+  return found ? stripThink(found.text) : null;
 }

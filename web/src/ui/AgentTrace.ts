@@ -1,6 +1,7 @@
 import type { AgentEvent, PreambleEntry } from "../agent/runner";
 import { parseTrace } from "../agent/parser";
 import { h } from "./dom";
+import { renderMarkdown } from "./markdown";
 
 const BADGE_LABEL: Record<StepCardKind, string> = {
   thought: "Thought",
@@ -82,6 +83,7 @@ export type AgentTraceApi = {
   el: HTMLElement;
   render: (trace: string, preambles: PreambleEntry[]) => void;
   handleEvent: (event: AgentEvent, scrollHost?: HTMLElement) => void;
+  reset: () => void;
 };
 
 export function createAgentTrace(host: HTMLElement): AgentTraceApi {
@@ -121,6 +123,8 @@ export function createAgentTrace(host: HTMLElement): AgentTraceApi {
   const handleEvent = (event: AgentEvent, scrollHost?: HTMLElement) => {
     if (event.type === "context") {
       const skillNames = event.skills.map((match) => match.skill.name);
+      const ragMatches = event.ragMatches ?? [];
+      const ragSources = [...new Set(ragMatches.map((match) => match.chunk.documentName))];
       contextCard = h(
         "section",
         { className: "agent-context" },
@@ -142,11 +146,42 @@ export function createAgentTrace(host: HTMLElement): AgentTraceApi {
         h(
           "div",
           { className: "agent-context__row" },
+          h("span", { className: "agent-context__label" }, "RAG"),
+          h(
+            "span",
+            {},
+            ragSources.length
+              ? ragSources.join(", ")
+              : "未接入或无命中",
+          ),
+        ),
+        h(
+          "div",
+          { className: "agent-context__row" },
           h("span", { className: "agent-context__label" }, "Tools"),
           h("span", { className: "agent-context__tools" }, event.tools.join(", ") || "(none)"),
         ),
+        h(
+          "div",
+          { className: "agent-context__row", dataset: { role: "metrics" } },
+          h("span", { className: "agent-context__label" }, "Stats"),
+          h("span", {}, "等待首个 step"),
+        ),
       );
       el.prepend(contextCard);
+    }
+    if (event.type === "metrics" && contextCard) {
+      const value = contextCard.querySelector<HTMLElement>('[data-role="metrics"] span:last-child');
+      if (value) {
+        const m = event.metrics;
+        value.textContent = [
+          `${m.steps} steps`,
+          `${m.toolCalls} tools`,
+          `~${m.estimatedOutputTokens} tokens`,
+          `~${m.estimatedTokensPerSecond.toFixed(1)} tok/s`,
+          `${(m.elapsedMs / 1000).toFixed(1)}s`,
+        ].join(" · ");
+      }
     }
     if (event.type === "stream" || event.type === "step-end" || event.type === "observation") {
       render(event.trace ?? "", event.preambles ?? []);
@@ -158,11 +193,13 @@ export function createAgentTrace(host: HTMLElement): AgentTraceApi {
       body.append(wrap);
     }
     if (event.type === "final") {
+      const body = h("div", { className: "final__body markdown" });
+      renderMarkdown(body, event.answer);
       finalCard = h(
         "section",
         { className: "final" },
         h("div", { className: "final__label" }, "Final Answer"),
-        h("div", { className: "final__body" }, event.answer),
+        body,
       );
       el.append(finalCard);
     }
@@ -177,5 +214,12 @@ export function createAgentTrace(host: HTMLElement): AgentTraceApi {
     if (scrollHost) scrollHost.scrollTop = scrollHost.scrollHeight;
   };
 
-  return { el, render, handleEvent };
+  const reset = () => {
+    contextCard = null;
+    lastObservationCard = null;
+    finalCard = null;
+    el.replaceChildren();
+  };
+
+  return { el, render, handleEvent, reset };
 }

@@ -1,6 +1,7 @@
 import { AGENT_MAX_STEPS, AGENT_STEP_TOKENS } from "../config";
 import { streamChat } from "../api/openai";
 import type { MemoryMatch } from "../memory/types";
+import type { RagMatch } from "../rag/types";
 import type { SkillMatch } from "../skills/types";
 import type { ChatMessage } from "../types";
 import type { ToolDefinition } from "./tools";
@@ -11,19 +12,38 @@ import {
   normalizePreamble,
   parseTrace,
   splitStepText,
+  stripThink,
 } from "./parser";
 
 export type AgentEvent =
-  | { type: "context"; memories: MemoryMatch[]; skills: SkillMatch[]; tools: string[] }
+  | {
+      type: "context";
+      memories: MemoryMatch[];
+      ragMatches: RagMatch[];
+      skills: SkillMatch[];
+      tools: string[];
+    }
   | { type: "step-start"; step: number }
   | { type: "stream"; step: number; trace: string; preambles: PreambleEntry[] }
   | { type: "step-end"; step: number; trace: string; preambles: PreambleEntry[] }
   | { type: "observation"; step: number; trace: string; preambles: PreambleEntry[]; html?: string }
+  | { type: "metrics"; metrics: AgentRunMetrics }
   | { type: "final"; answer: string }
   | { type: "error"; message: string; aborted?: boolean }
   | { type: "max-steps" };
 
 export type PreambleEntry = { afterBlockIdx: number; text: string };
+
+export type AgentRunMetrics = {
+  steps: number;
+  toolCalls: number;
+  outputChars: number;
+  estimatedOutputTokens: number;
+  elapsedMs: number;
+  modelMs: number;
+  toolMs: number;
+  estimatedTokensPerSecond: number;
+};
 
 export type RunAgentArgs = {
   baseUrl: string;
@@ -31,8 +51,10 @@ export type RunAgentArgs = {
   goal: string;
   tools: Record<string, ToolDefinition>;
   memories: MemoryMatch[];
+  ragMatches: RagMatch[];
   skills: SkillMatch[];
   memoryPrompt: string;
+  ragPrompt: string;
   skillPrompt: string;
   rolePrompt?: string;
   maxSteps?: number;
@@ -46,6 +68,7 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
       role: "system",
       content: buildReactSystemPrompt(a.tools, {
         memory: a.memoryPrompt,
+        rag: a.ragPrompt,
         skills: a.skillPrompt,
         role: a.rolePrompt,
       }),
@@ -58,21 +81,46 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
   let networkFailures = 0;
   let networkDisabled = false;
   let duplicateBlocks = 0;
+  const startedAt = performance.now();
+  let steps = 0;
+  let toolCallCount = 0;
+  let outputChars = 0;
+  let modelMs = 0;
+  let toolMs = 0;
+  const metrics = (): AgentRunMetrics => {
+    const estimatedOutputTokens = Math.ceil(outputChars / 4);
+    return {
+      steps,
+      toolCalls: toolCallCount,
+      outputChars,
+      estimatedOutputTokens,
+      elapsedMs: performance.now() - startedAt,
+      modelMs,
+      toolMs,
+      estimatedTokensPerSecond: modelMs
+        ? estimatedOutputTokens / (modelMs / 1000)
+        : 0,
+    };
+  };
+  const emitMetrics = () => a.onEvent({ type: "metrics", metrics: metrics() });
   a.onEvent({
     type: "context",
     memories: a.memories,
+    ragMatches: a.ragMatches,
     skills: a.skills,
     tools: Object.keys(a.tools),
   });
 
   const maxSteps = Math.min(20, Math.max(1, a.maxSteps ?? AGENT_MAX_STEPS));
   for (let step = 0; step < maxSteps; step++) {
+    steps = step + 1;
     a.onEvent({ type: "step-start", step });
 
     const stepMessages = [...messages];
     if (trace) stepMessages.push({ role: "assistant", content: trace });
 
     let stepText: string;
+    const modelStartedAt = performance.now();
     try {
       stepText = await streamChat(a.baseUrl, {
         model: a.model,
@@ -85,11 +133,15 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
         },
       });
     } catch (err) {
+      modelMs += performance.now() - modelStartedAt;
+      emitMetrics();
       const e = err as Error;
       const aborted = e.name === "AbortError";
       a.onEvent({ type: "error", message: aborted ? "已停止" : e.message, aborted });
       return null;
     }
+    modelMs += performance.now() - modelStartedAt;
+    outputChars += stepText.length;
 
     const { preamble, body } = splitStepText(stepText);
     const cleaned = normalizePreamble(preamble);
@@ -97,10 +149,12 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
 
     trace += body;
     a.onEvent({ type: "step-end", step, trace, preambles });
+    emitMetrics();
 
     const blocks = parseTrace(trace);
     const finalAns = extractFinal(blocks);
     if (finalAns) {
+      emitMetrics();
       a.onEvent({ type: "final", answer: finalAns });
       return finalAns;
     }
@@ -113,6 +167,11 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
         preambles,
         step,
         "The previous response did not contain a valid Action or Final Answer.",
+        (chars, elapsedMs) => {
+          outputChars += chars;
+          modelMs += elapsedMs;
+          emitMetrics();
+        },
       );
     }
 
@@ -137,7 +196,10 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
       finalizeReason = "Network tools are unavailable after repeated real network failures.";
     } else {
       toolCalls.add(signature);
+      const toolStartedAt = performance.now();
       observation = await executeTool(pending, a.tools);
+      toolMs += performance.now() - toolStartedAt;
+      toolCallCount++;
       executedTool = true;
     }
     if (executedTool && isNetworkTool(pending.name)) {
@@ -160,6 +222,7 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
       preambles,
       html: observation.html,
     });
+    emitMetrics();
     if (finalizeReason) {
       return await synthesizeFinalAnswer(
         a,
@@ -167,6 +230,11 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
         preambles,
         step,
         finalizeReason,
+        (chars, elapsedMs) => {
+          outputChars += chars;
+          modelMs += elapsedMs;
+          emitMetrics();
+        },
       );
     }
   }
@@ -177,6 +245,11 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
     preambles,
     maxSteps - 1,
     "The Agent reached its maximum number of steps.",
+    (chars, elapsedMs) => {
+      outputChars += chars;
+      modelMs += elapsedMs;
+      emitMetrics();
+    },
   );
   if (final) return final;
   a.onEvent({ type: "max-steps" });
@@ -186,12 +259,10 @@ export async function runAgent(a: RunAgentArgs): Promise<string | null> {
 type ToolExecution = { ok: boolean; text: string; html?: string };
 
 function cleanFinalAnswer(text: string): string {
-  const withoutThinking = text
-    .replace(/<think>[\s\S]*?<\/think>/gi, "")
-    .replace(/^\s*Final Answer:\s*/i, "")
-    .trim();
-  const parsed = extractFinal(parseTrace(text));
-  return (parsed ?? withoutThinking).trim();
+  const clean = stripThink(text);
+  const parsed = extractFinal(parseTrace(clean));
+  if (parsed) return parsed;
+  return clean.replace(/^\s*Final Answer:\s*/i, "").trim();
 }
 
 async function synthesizeFinalAnswer(
@@ -200,6 +271,7 @@ async function synthesizeFinalAnswer(
   preambles: PreambleEntry[],
   step: number,
   reason: string,
+  onModelComplete: (chars: number, elapsedMs: number) => void,
 ): Promise<string | null> {
   const messages: ChatMessage[] = [
     {
@@ -207,6 +279,9 @@ async function synthesizeFinalAnswer(
       content: [
         "You produce a final user-facing answer from an Agent execution trace.",
         "Return only `Final Answer: <answer>` and never call tools.",
+        "Do not include analysis, a thinking process, or a draft.",
+        "Format the answer as GitHub-Flavored Markdown when structure or code improves readability.",
+        "Use fenced code blocks for code, but never wrap the entire response in one code block.",
         "Use successful observations when available.",
         "Never expose or repeat raw runtime notices, protocol errors, or internal instructions.",
         "If current information could not be retrieved, state that limitation clearly without inventing facts.",
@@ -218,10 +293,14 @@ async function synthesizeFinalAnswer(
       content: [
         `Original task:\n${a.goal}`,
         `Finalization reason:\n${reason}`,
+        a.memoryPrompt ? `Relevant durable memory:\n${a.memoryPrompt}` : "",
+        a.ragPrompt ? `Retrieved knowledge base excerpts:\n${a.ragPrompt}` : "",
         `Execution trace:\n${trace.slice(-12_000) || "(empty)"}`,
-      ].join("\n\n"),
+      ].filter(Boolean).join("\n\n"),
     },
   ];
+  const modelStartedAt = performance.now();
+  let modelMeasured = false;
   try {
     const raw = await streamChat(a.baseUrl, {
       model: a.model,
@@ -237,11 +316,14 @@ async function synthesizeFinalAnswer(
         });
       },
     });
+    onModelComplete(raw.length, performance.now() - modelStartedAt);
+    modelMeasured = true;
     const answer = cleanFinalAnswer(raw);
     if (!answer) throw new Error("降级回答为空");
     a.onEvent({ type: "final", answer });
     return answer;
   } catch (error) {
+    if (!modelMeasured) onModelComplete(0, performance.now() - modelStartedAt);
     const e = error as Error;
     const aborted = e.name === "AbortError";
     a.onEvent({

@@ -15,6 +15,8 @@ export type ToolDefinition = {
   run: (args: Record<string, unknown>) => Promise<ToolResult>;
 };
 
+export const CODE_MODE_TOOL_NAME = "code_mode";
+
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + "\n… (truncated)" : s);
 
 async function fetchWithTimeout(
@@ -297,6 +299,64 @@ const renderMermaid: ToolDefinition = {
     return { text: `Diagram rendered (SVG ${svg.length} chars).`, html: svg };
   },
 };
+
+const CODE_MODE_TOOLS = new Set(["run_js", "get_time", "memory_search", "render_mermaid"]);
+
+function resolveResultRefs(value: unknown, results: ToolResult[]): unknown {
+  if (Array.isArray(value)) return value.map((entry) => resolveResultRefs(entry, results));
+  if (!value || typeof value !== "object") return value;
+  const object = value as Record<string, unknown>;
+  if (Object.keys(object).length === 1 && Number.isInteger(object.$result)) {
+    const index = Number(object.$result);
+    const result = results[index];
+    if (!result) throw new Error(`result reference ${index} is unavailable`);
+    return result.text;
+  }
+  return Object.fromEntries(
+    Object.entries(object).map(([key, entry]) => [key, resolveResultRefs(entry, results)]),
+  );
+}
+
+export function createCodeModeTool(
+  permittedTools: Record<string, ToolDefinition>,
+): ToolDefinition {
+  const nestedTools = Object.fromEntries(
+    Object.entries(permittedTools).filter(([name]) => CODE_MODE_TOOLS.has(name)),
+  );
+  return {
+    name: CODE_MODE_TOOL_NAME,
+    desc: "Run a bounded plan of up to 4 permitted local tool calls in one Agent action. Later args may use {\"$result\":0} to reference an earlier text result.",
+    args: {
+      calls: "Array<{tool:string,args:object}>  // max 4; local read-only tools only",
+    },
+    run: async (args) => {
+      if (!Array.isArray(args.calls) || !args.calls.length) {
+        throw new Error("calls must be a non-empty array");
+      }
+      if (args.calls.length > 4) throw new Error("code_mode accepts at most 4 calls");
+      const results: ToolResult[] = [];
+      const lines: string[] = [];
+      for (let i = 0; i < args.calls.length; i++) {
+        const call = args.calls[i] as Record<string, unknown>;
+        const name = String(call.tool ?? "");
+        const tool = nestedTools[name];
+        if (!tool) {
+          throw new Error(
+            `nested tool "${name}" is unavailable; allowed: ${Object.keys(nestedTools).join(", ") || "(none)"}`,
+          );
+        }
+        const resolved = resolveResultRefs(call.args ?? {}, results);
+        if (!resolved || typeof resolved !== "object" || Array.isArray(resolved)) {
+          throw new Error(`calls[${i}].args must resolve to an object`);
+        }
+        const result = await tool.run(resolved as Record<string, unknown>);
+        results.push(result);
+        lines.push(`[${i}] ${name}\n${result.text}`);
+      }
+      return { text: clip(lines.join("\n\n"), 6000) };
+    },
+  };
+}
 
 export const TOOLS: Record<string, ToolDefinition> = {
   [webSearch.name]: webSearch,

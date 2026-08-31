@@ -6,10 +6,12 @@ export type HeaderModel = {
   models: string[];
   currentModel: string;
   agentMode: boolean;
+  ragEnabled: boolean;
   sessionId: string;
   sessions: Array<{ id: string; title: string }>;
   agentCount: number;
   memoryCount: number;
+  ragCount: number;
   skillCount: number;
   running: boolean;
   status: { state: ConnectionState; text: string };
@@ -19,12 +21,15 @@ export type HeaderCallbacks = {
   onBaseUrlChange: (v: string) => void;
   onModelChange: (v: string) => void;
   onAgentToggle: (v: boolean) => void;
+  onRagToggle: (v: boolean) => void;
   onRefresh: () => void;
   onSessionChange: (id: string) => void;
   onNewSession: () => void;
   onManageAgents: () => void;
   onManageMemory: () => void;
+  onManageRag: () => void;
   onManageSkills: () => void;
+  onManageTrajectories: () => void;
 };
 
 export function createHeader(cb: HeaderCallbacks) {
@@ -55,6 +60,15 @@ export function createHeader(cb: HeaderCallbacks) {
     h("span", { className: "switch-track" }, h("span", { className: "switch-thumb" })),
     h("span", { className: "switch-label" }, "Agent 模式"),
   );
+  const ragInput = h("input", { type: "checkbox" }) as HTMLInputElement;
+  ragInput.addEventListener("change", () => cb.onRagToggle(ragInput.checked));
+  const ragToggle = h(
+    "label",
+    { className: "switch", title: "开启后每次提问自动检索并注入 RAG 知识库" },
+    ragInput,
+    h("span", { className: "switch-track" }, h("span", { className: "switch-thumb" })),
+    h("span", { className: "switch-label" }, "接入 RAG"),
+  );
 
   const sessionSelect = h(
     "select",
@@ -79,11 +93,26 @@ export function createHeader(cb: HeaderCallbacks) {
     "Memory ",
     h("span", { className: "header-count", dataset: { role: "memory-count" } }, "0"),
   );
+  const ragBtn = h(
+    "button",
+    { className: "icon-btn ghost", title: "导入和管理 RAG 知识库", onClick: cb.onManageRag },
+    "RAG ",
+    h("span", { className: "header-count", dataset: { role: "rag-count" } }, "0"),
+  );
   const skillsBtn = h(
     "button",
     { className: "icon-btn ghost", title: "管理 Agent Skills", onClick: cb.onManageSkills },
     "Skills ",
     h("span", { className: "header-count", dataset: { role: "skill-count" } }, "0"),
+  );
+  const trajectoriesBtn = h(
+    "button",
+    {
+      className: "icon-btn ghost",
+      title: "查看并回放当前会话的 Agent Trajectory",
+      onClick: cb.onManageTrajectories,
+    },
+    "Traces",
   );
 
   const statusText = h("span", { className: "status-text" });
@@ -113,7 +142,10 @@ export function createHeader(cb: HeaderCallbacks) {
       sessionBtn,
       agentsBtn,
       memoryBtn,
+      ragBtn,
       skillsBtn,
+      trajectoriesBtn,
+      ragToggle,
       agentToggle,
     ),
   );
@@ -133,6 +165,7 @@ export function createHeader(cb: HeaderCallbacks) {
     }
     modelSelect.value = m.currentModel;
     agentInput.checked = m.agentMode;
+    ragInput.checked = m.ragEnabled;
     const sessionSignature = m.sessions.map((session) => `${session.id}:${session.title}`).join("|");
     if (sessionSelect.dataset.signature !== sessionSignature) {
       sessionSelect.replaceChildren(
@@ -147,9 +180,11 @@ export function createHeader(cb: HeaderCallbacks) {
     sessionBtn.disabled = m.running;
     const agentCount = el.querySelector<HTMLElement>('[data-role="agent-count"]')!;
     const memoryCount = el.querySelector<HTMLElement>('[data-role="memory-count"]')!;
+    const ragCount = el.querySelector<HTMLElement>('[data-role="rag-count"]')!;
     const skillCount = el.querySelector<HTMLElement>('[data-role="skill-count"]')!;
     agentCount.textContent = String(m.agentCount);
     memoryCount.textContent = String(m.memoryCount);
+    ragCount.textContent = String(m.ragCount);
     skillCount.textContent = String(m.skillCount);
     dot.dataset.state = m.status.state;
     statusText.textContent = m.status.text;

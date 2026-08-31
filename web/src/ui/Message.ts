@@ -1,4 +1,5 @@
 import { h } from "./dom";
+import { renderMarkdown } from "./markdown";
 
 /** Split raw assistant text into optional <think>…</think> segment + answer. */
 function extractThink(raw: string): { think: string; answer: string } {
@@ -20,7 +21,7 @@ export function createAssistantMessage() {
   const think = h("div", { className: "think", hidden: true });
   const thinkBody = h("div", { className: "think__body" });
   think.append(h("div", { className: "think__label" }, "思考过程"), thinkBody);
-  const answer = h("div", { className: "answer" });
+  const answer = h("div", { className: "answer markdown" });
   const bubble = h("div", { className: "bubble" }, think, answer);
   const row = h("div", { className: "message message--assistant" }, bubble);
 
@@ -32,7 +33,8 @@ export function createAssistantMessage() {
     } else {
       think.hidden = true;
     }
-    answer.textContent = a;
+    if (streaming) answer.textContent = a;
+    else renderMarkdown(answer, a);
     answer.classList.toggle("streaming", streaming);
   }
 
@@ -77,6 +79,8 @@ export function parseSubAgentResult(content: string): SubAgentResult | null {
 }
 
 export function createSubAgentResultMessage(result: SubAgentResult) {
+  const answer = h("div", { className: "sub-agent-result__answer markdown" });
+  renderMarkdown(answer, result.answer);
   const bubble = h(
     "div",
     { className: "bubble bubble--sub-agent" },
@@ -87,7 +91,7 @@ export function createSubAgentResultMessage(result: SubAgentResult) {
       h("strong", {}, result.agentName),
     ),
     h("div", { className: "sub-agent-result__goal" }, result.goal),
-    h("div", { className: "sub-agent-result__answer" }, result.answer),
+    answer,
   );
   return h("div", { className: "message message--assistant message--sub-agent" }, bubble);
 }

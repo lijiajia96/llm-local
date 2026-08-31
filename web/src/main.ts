@@ -4,7 +4,7 @@ import { listModels, streamChat } from "./api/openai";
 import { prepareAgentContext } from "./agent/context";
 import { parseTrace } from "./agent/parser";
 import { runAgent, type AgentEvent } from "./agent/runner";
-import { TOOLS } from "./agent/tools";
+import { CODE_MODE_TOOL_NAME, TOOLS } from "./agent/tools";
 import { parseAgentMention } from "./agents/mention-parser";
 import { AgentProfileRepository } from "./agents/repository";
 import { AgentTaskScheduler } from "./agents/scheduler";
@@ -17,8 +17,12 @@ import { inferMemoryFromUserText } from "./memory/context";
 import { consolidateConversation } from "./memory/consolidator";
 import { MemoryRepository } from "./memory/repository";
 import { createMemoryTools } from "./memory/tools";
+import { buildRagSystemPrompt, formatRagContext } from "./rag/context";
+import { RagRepository } from "./rag/repository";
+import type { RagMatch } from "./rag/types";
 import { SessionRepository, type SessionRecord } from "./sessions/repository";
 import { SkillRepository } from "./skills/repository";
+import { TrajectoryRepository } from "./trajectory/repository";
 import type { ChatMessage, ConnectionState, ContentPart } from "./types";
 
 import { createHeader } from "./ui/Header";
@@ -35,6 +39,8 @@ import {
 import { createAgentTrace } from "./ui/AgentTrace";
 import { createAgentManager } from "./ui/AgentManager";
 import { createTaskWorkspace } from "./ui/TaskWorkspace";
+import { createTrajectoryWorkspace } from "./ui/TrajectoryWorkspace";
+import { createRagManager } from "./ui/RagManager";
 import { h, loadPref, savePref } from "./ui/dom";
 
 import { CHAT_TOKENS, DEFAULT_BASE_URL, STORAGE_KEYS } from "./config";
@@ -44,12 +50,14 @@ type AppState = {
   models: string[];
   currentModel: string;
   agentMode: boolean;
+  ragEnabled: boolean;
   sessionId: string;
   sessions: SessionRecord[];
   agentProfiles: AgentProfile[];
   agentTasks: AgentTask[];
   agentCount: number;
   memoryCount: number;
+  ragCount: number;
   skillCount: number;
   status: { state: ConnectionState; text: string };
   running: boolean;
@@ -74,12 +82,14 @@ const state: AppState = {
   models: [],
   currentModel: loadPref(STORAGE_KEYS.model, ""),
   agentMode: loadPref(STORAGE_KEYS.agent, false),
+  ragEnabled: loadPref(STORAGE_KEYS.rag, false),
   sessionId: initialSessionId,
   sessions: [],
   agentProfiles: [],
   agentTasks: [],
   agentCount: 0,
   memoryCount: 0,
+  ragCount: 0,
   skillCount: 0,
   status: { state: "idle", text: "就绪" },
   running: false,
@@ -93,6 +103,8 @@ const memoryRepository = new MemoryRepository(() => sessionNamespace(state.sessi
 const sessionRepository = new SessionRepository();
 const skillRepository = new SkillRepository();
 const agentProfileRepository = new AgentProfileRepository();
+const trajectoryRepository = new TrajectoryRepository();
+const ragRepository = new RagRepository();
 const taskScheduler = new AgentTaskScheduler({
   maxConcurrency: 3,
   runner: runScheduledAgentTask,
@@ -124,12 +136,20 @@ const header = createHeader({
     render();
     void safePersistCurrentSession();
   },
+  onRagToggle(v) {
+    state.ragEnabled = v;
+    savePref(STORAGE_KEYS.rag, v);
+    render();
+    setStatus("ok", v ? "RAG 自动检索已开启" : "RAG 自动检索已关闭");
+  },
   onRefresh: () => void refreshModels(),
   onSessionChange: (id) => void switchSession(id),
   onNewSession: () => void startNewSession(),
   onManageAgents: () => void manager.open("agents"),
   onManageMemory: () => void manager.open("memory"),
+  onManageRag: () => void ragManager.open(),
   onManageSkills: () => void manager.open("skills"),
+  onManageTrajectories: () => void trajectoryWorkspace.open(state.sessionId),
 });
 
 const composer = createComposer({
@@ -146,7 +166,7 @@ const manager = createAgentManager(
   memoryRepository,
   skillRepository,
   agentProfileRepository,
-  Object.keys({ ...TOOLS, ...createMemoryTools(memoryRepository) }),
+  [...Object.keys({ ...TOOLS, ...createMemoryTools(memoryRepository) }), CODE_MODE_TOOL_NAME],
   { onChanged: () => void refreshAgentMetadata() },
 );
 const taskWorkspace = createTaskWorkspace({
@@ -154,6 +174,8 @@ const taskWorkspace = createTaskWorkspace({
   onRemove: (taskId) => taskScheduler.remove(taskId),
   onClearFinished: () => taskScheduler.clearFinished(),
 });
+const trajectoryWorkspace = createTrajectoryWorkspace(trajectoryRepository);
+const ragManager = createRagManager(ragRepository, () => void refreshAgentMetadata());
 taskScheduler.subscribe((event) => {
   state.agentTasks = taskScheduler.listTasks();
   taskWorkspace.update(state.agentTasks, state.agentProfiles);
@@ -169,7 +191,15 @@ taskScheduler.subscribe((event) => {
   }
 });
 
-root.append(header.el, chatView.el, composer.el, manager.el, taskWorkspace.el);
+root.append(
+  header.el,
+  chatView.el,
+  composer.el,
+  manager.el,
+  taskWorkspace.el,
+  trajectoryWorkspace.el,
+  ragManager.el,
+);
 
 function render() {
   header.update({
@@ -177,10 +207,12 @@ function render() {
     models: state.models,
     currentModel: state.currentModel,
     agentMode: state.agentMode,
+    ragEnabled: state.ragEnabled,
     sessionId: state.sessionId,
     sessions: state.sessions,
     agentCount: state.agentCount,
     memoryCount: state.memoryCount,
+    ragCount: state.ragCount,
     skillCount: state.skillCount,
     running: state.running,
     status: state.status,
@@ -231,6 +263,7 @@ async function activateSession(session: SessionRecord, statusText: string) {
   state.sessions = await sessionRepository.list();
   restoreHistory();
   render();
+  void trajectoryWorkspace.refresh(session.id);
   await refreshAgentMetadata();
   setStatus("ok", statusText);
   composer.focus();
@@ -342,12 +375,14 @@ async function refreshModels() {
 
 async function refreshAgentMetadata() {
   try {
-    const [memoryStats, skills, agents] = await Promise.all([
+    const [memoryStats, ragStats, skills, agents] = await Promise.all([
       memoryRepository.stats(),
+      ragRepository.stats(),
       skillRepository.list(),
       agentProfileRepository.list(),
     ]);
     state.memoryCount = memoryStats.total;
+    state.ragCount = ragStats.documents;
     state.skillCount = skills.filter((skill) => skill.enabled).length;
     state.agentProfiles = agents;
     state.agentCount = agents.filter((agent) => agent.enabled).length;
@@ -375,87 +410,116 @@ async function runScheduledAgentTask(
   if (!model) throw new Error("No model selected for this Agent");
   const baseUrl = state.baseUrl;
   const taskMemory = new MemoryRepository(() => sessionNamespace(task.sessionId));
-
-  runtime.report({ phase: "context", message: "正在加载 Memory、Skills 和工具" });
-  const context = await prepareAgentContext(
-    task.goal,
-    taskMemory,
-    skillRepository,
+  const trajectory = await trajectoryRepository.startRun(
+    task.sessionId,
     {
-      skillIds: profile.skillIds,
-      allowedTools: profile.allowedTools,
+      goal: task.goal,
+      model,
+      source: "sub-agent",
+      agentName: profile.displayName,
     },
+    task.id,
   );
-  let runtimeError: string | undefined;
-  let lastStreamReportAt = 0;
-  const onEvent = (event: AgentEvent) => {
-    if (event.type === "context") {
-      runtime.report({
-        phase: "context",
-        message: `${event.skills.length} Skills · ${event.memories.length} Memory · ${event.tools.length} Tools`,
-      });
-    } else if (event.type === "step-start") {
-      runtime.report({
-        phase: "thinking",
-        message: "模型正在生成下一步动作",
-        step: event.step + 1,
-        totalSteps: profile.maxSteps,
-      });
-    } else if (event.type === "stream") {
-      const now = performance.now();
-      if (now - lastStreamReportAt >= 1000) {
-        lastStreamReportAt = now;
+
+  try {
+    runtime.report({ phase: "context", message: "正在加载 Memory、Skills 和工具" });
+    const context = await prepareAgentContext(
+      task.goal,
+      taskMemory,
+      skillRepository,
+      {
+        skillIds: profile.skillIds,
+        allowedTools: profile.allowedTools,
+        ragRepository,
+        ragEnabled: state.ragEnabled,
+      },
+    );
+    let runtimeError: string | undefined;
+    let lastStreamReportAt = 0;
+    const onEvent = (event: AgentEvent) => {
+      trajectory.append(event);
+      if (event.type === "context") {
         runtime.report({
-          phase: "streaming",
-          message: `已接收 ${event.trace.length} 个字符`,
+          phase: "context",
+          message: `${event.skills.length} Skills · ${event.memories.length} Memory · ${event.ragMatches.length} RAG · ${event.tools.length} Tools`,
+        });
+      } else if (event.type === "step-start") {
+        runtime.report({
+          phase: "thinking",
+          message: "模型正在生成下一步动作",
           step: event.step + 1,
           totalSteps: profile.maxSteps,
         });
+      } else if (event.type === "stream") {
+        const now = performance.now();
+        if (now - lastStreamReportAt >= 1000) {
+          lastStreamReportAt = now;
+          runtime.report({
+            phase: "streaming",
+            message: `已接收 ${event.trace.length} 个字符`,
+            step: event.step + 1,
+            totalSteps: profile.maxSteps,
+          });
+        }
+      } else if (event.type === "observation") {
+        const action = parseTrace(event.trace)
+          .filter((block) => block.kind === "action")
+          .at(-1)?.text.trim();
+        runtime.report({
+          phase: "tool",
+          message: action ? `工具已完成：${action}` : "已收到工具结果",
+          step: event.step + 1,
+          totalSteps: profile.maxSteps,
+        });
+      } else if (event.type === "metrics") {
+        runtime.report({
+          phase: "streaming",
+          message: `~${event.metrics.estimatedOutputTokens} tokens · ~${event.metrics.estimatedTokensPerSecond.toFixed(1)} tok/s`,
+          step: event.metrics.steps,
+          totalSteps: profile.maxSteps,
+        });
+      } else if (event.type === "final") {
+        runtime.report({ phase: "final", message: "最终答案已生成" });
+      } else if (event.type === "max-steps") {
+        runtimeError = "Agent 已达到最大执行步数";
+      } else if (event.type === "error") {
+        runtimeError = event.message;
       }
-    } else if (event.type === "observation") {
-      const action = parseTrace(event.trace)
-        .filter((block) => block.kind === "action")
-        .at(-1)?.text.trim();
-      runtime.report({
-        phase: "tool",
-        message: action ? `工具已完成：${action}` : "已收到工具结果",
-        step: event.step + 1,
-        totalSteps: profile.maxSteps,
-      });
-    } else if (event.type === "final") {
-      runtime.report({ phase: "final", message: "最终答案已生成" });
-    } else if (event.type === "max-steps") {
-      runtimeError = "Agent 已达到最大执行步数";
-    } else if (event.type === "error") {
-      runtimeError = event.message;
-    }
-  };
+    };
 
-  const answer = await runAgent({
-    baseUrl,
-    model,
-    goal: task.goal,
-    ...context,
-    rolePrompt: profile.rolePrompt,
-    maxSteps: profile.maxSteps,
-    signal: runtime.signal,
-    onEvent,
-  });
-  if (runtime.signal.aborted) throw abortError();
-  if (runtimeError) throw new Error(runtimeError);
-  if (!answer) throw new Error("Agent did not produce a final answer");
+    const answer = await runAgent({
+      baseUrl,
+      model,
+      goal: task.goal,
+      ...context,
+      rolePrompt: profile.rolePrompt,
+      maxSteps: profile.maxSteps,
+      signal: runtime.signal,
+      onEvent,
+    });
+    if (runtime.signal.aborted) throw abortError();
+    if (runtimeError) throw new Error(runtimeError);
+    if (!answer) throw new Error("Agent did not produce a final answer");
 
-  await taskMemory.save({
-    kind: "episode",
-    title: `[${profile.displayName}] ${task.goal}`.slice(0, 160),
-    content: `Task: ${task.goal}\nAnswer: ${answer}`.slice(0, 6000),
-    tags: ["conversation", "sub-agent", profile.name],
-    importance: 0.55,
-    source: "agent",
-    scope: "agent",
-  });
-  if (state.sessionId === task.sessionId) void refreshAgentMetadata();
-  return answer;
+    await taskMemory.save({
+      kind: "episode",
+      title: `[${profile.displayName}] ${task.goal}`.slice(0, 160),
+      content: `Task: ${task.goal}\nAnswer: ${answer}`.slice(0, 6000),
+      tags: ["conversation", "sub-agent", profile.name],
+      importance: 0.55,
+      source: "agent",
+      scope: "agent",
+    });
+    trajectory.finish("completed");
+    if (state.sessionId === task.sessionId) void refreshAgentMetadata();
+    return answer;
+  } catch (error) {
+    trajectory.finish(runtime.signal.aborted ? "cancelled" : "failed");
+    throw error;
+  } finally {
+    await trajectory.flush();
+    if (state.sessionId === task.sessionId) void trajectoryWorkspace.refresh(task.sessionId);
+  }
 }
 
 async function rememberExplicitUserInput(text: string) {
@@ -592,9 +656,17 @@ async function sendChat(text: string, attachments: string[]) {
 
   let accumulated = "";
   try {
+    const ragMatches = await retrieveRag(text);
+    const ragContext = formatRagContext(ragMatches);
+    const messages: ChatMessage[] = ragContext
+      ? [
+          { role: "system", content: buildRagSystemPrompt(ragContext) },
+          ...state.history,
+        ]
+      : state.history;
     accumulated = await streamChat(state.baseUrl, {
       model: state.currentModel,
-      messages: state.history,
+      messages,
       temperature: 0.7,
       maxTokens: CHAT_TOKENS,
       signal: currentController.signal,
@@ -641,13 +713,29 @@ async function sendAgent(text: string) {
   const agent = createAgentMessage();
   chatView.addMessage(agent.el);
   const trace = createAgentTrace(agent.traceHost);
+  let trajectory: Awaited<ReturnType<TrajectoryRepository["startRun"]>> | null = null;
+  let trajectoryStatus: "completed" | "failed" | "cancelled" = "failed";
 
   const onEvent = (e: AgentEvent) => {
+    trajectory?.append(e);
     trace.handleEvent(e, chatView.chatEl);
   };
 
   try {
-    const context = await prepareAgentContext(text, memoryRepository, skillRepository);
+    trajectory = await trajectoryRepository.startRun(state.sessionId, {
+      goal: text,
+      model: state.currentModel,
+      source: "main",
+    });
+    const context = await prepareAgentContext(
+      text,
+      memoryRepository,
+      skillRepository,
+      {
+        ragRepository,
+        ragEnabled: state.ragEnabled,
+      },
+    );
     const answer = await runAgent({
       baseUrl: state.baseUrl,
       model: state.currentModel,
@@ -660,11 +748,18 @@ async function sendAgent(text: string) {
       state.history.push({ role: "assistant", content: answer });
       await saveEpisode(text, answer);
       consolidateInBackground(text, answer);
+      trajectoryStatus = "completed";
+    } else if (currentController.signal.aborted) {
+      trajectoryStatus = "cancelled";
     }
     setStatus("ok", "Agent 完成");
   } catch (err) {
+    if (currentController?.signal.aborted) trajectoryStatus = "cancelled";
     setStatus("bad", "Agent 错误：" + (err as Error).message);
   } finally {
+    trajectory?.finish(trajectoryStatus);
+    await trajectory?.flush();
+    void trajectoryWorkspace.refresh(state.sessionId);
     await safePersistCurrentSession();
     state.running = false;
     currentController = null;
@@ -689,6 +784,18 @@ async function boot() {
   composer.focus();
   void refreshModels();
   void refreshAgentMetadata();
+}
+
+async function retrieveRag(query: string): Promise<RagMatch[]> {
+  if (!state.ragEnabled || !query.trim()) return [];
+  try {
+    setStatus("ok", "RAG 检索中…");
+    return await ragRepository.search(query, 6);
+  } catch (error) {
+    console.warn("RAG retrieval failed", error);
+    setStatus("bad", `RAG 检索失败，已继续生成：${(error as Error).message}`);
+    return [];
+  }
 }
 
 void boot();

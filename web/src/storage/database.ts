@@ -1,11 +1,15 @@
 const DB_NAME = "vllm-agent";
-const DB_VERSION = 4;
+const DB_VERSION = 7;
 
 export const STORES = {
   memories: "memories",
   skills: "skills",
   sessions: "sessions",
   agentProfiles: "agentProfiles",
+  trajectoryEvents: "trajectoryEvents",
+  ragDocuments: "ragDocuments",
+  ragChunks: "ragChunks",
+  ragEvalCases: "ragEvalCases",
 } as const;
 
 let databasePromise: Promise<IDBDatabase> | null = null;
@@ -43,6 +47,25 @@ export function openDatabase(): Promise<IDBDatabase> {
         const store = db.createObjectStore(STORES.agentProfiles, { keyPath: "id" });
         store.createIndex("enabled", "enabled");
         store.createIndex("updatedAt", "updatedAt");
+      }
+      if (!db.objectStoreNames.contains(STORES.trajectoryEvents)) {
+        const store = db.createObjectStore(STORES.trajectoryEvents, { keyPath: "id" });
+        store.createIndex("sessionId", "sessionId");
+        store.createIndex("runId", "runId");
+        store.createIndex("at", "at");
+      }
+      if (!db.objectStoreNames.contains(STORES.ragDocuments)) {
+        const store = db.createObjectStore(STORES.ragDocuments, { keyPath: "id" });
+        store.createIndex("updatedAt", "updatedAt");
+      }
+      if (!db.objectStoreNames.contains(STORES.ragChunks)) {
+        const store = db.createObjectStore(STORES.ragChunks, { keyPath: "id" });
+        store.createIndex("documentId", "documentId");
+      }
+      if (!db.objectStoreNames.contains(STORES.ragEvalCases)) {
+        const store = db.createObjectStore(STORES.ragEvalCases, { keyPath: "id" });
+        store.createIndex("expectedDocumentId", "expectedDocumentId");
+        store.createIndex("createdAt", "createdAt");
       }
     };
     request.onsuccess = () => resolve(request.result);

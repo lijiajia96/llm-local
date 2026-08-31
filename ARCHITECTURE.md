@@ -1,6 +1,6 @@
 # vLLM Chat Agent 架构
 
-> 最后同步：2026-08-02
+> 最后同步：2026-08-27
 >
 > 架构源码：`web/src/`
 >
@@ -16,6 +16,7 @@
 - 普通模式支持文字、图片和 SSE 流式输出；
 - Agent 模式使用文本协议实现 ReAct 工具循环；
 - Memory 按 session 隔离，Skills 和用户配置保存在浏览器本地；
+- 可选的本地 RAG 知识库支持自动分块、索引、检索和引用；
 - 本地语义模型通过 Web Worker + ONNX/WASM 运行；
 - 不依赖业务后端、云端数据库或独立向量数据库。
 
@@ -30,8 +31,9 @@ flowchart LR
         Main[main.ts<br/>状态与编排]
         Agent[Agent Runtime]
         Memory[Local Memory OS]
+        RAG[Local RAG Pipeline]
         Skills[Skill Registry]
-        IDB[(IndexedDB<br/>Memory / Skills / Sessions)]
+        IDB[(IndexedDB<br/>Memory / Skills / Sessions / Trajectory)]
         Worker[Embedding Web Worker]
         Cache[(Browser Cache)]
     end
@@ -50,14 +52,18 @@ flowchart LR
     UI --> Main
     Main --> Agent
     Main --> Memory
+    Main --> RAG
     Main --> Skills
     Main -->|models / chat completions| VLLM
     Agent -->|ReAct step| VLLM
     Agent --> GitHub
     Agent --> Jina
     Memory <--> IDB
+    RAG <--> IDB
     Skills <--> IDB
+    Main <--> IDB
     Memory <--> Worker
+    RAG <--> Worker
     Worker <--> Cache
     Worker -. 首次下载 .-> HF
 ```
@@ -66,9 +72,9 @@ flowchart LR
 
 | 边界 | 责任 |
 |---|---|
-| 浏览器 | UI、状态、Agent、Memory、Skills、工具编排 |
+| 浏览器 | UI、状态、Agent、Memory、RAG、Skills、工具编排 |
 | vLLM | 模型列表、普通对话、Agent step、后台 Memory 抽取 |
-| IndexedDB | Memory 与自定义/覆盖 Skill 的持久化 |
+| IndexedDB | Memory、RAG 文档/chunk、会话、自定义/覆盖 Skill 与 append-only Trajectory 的持久化 |
 | Web Worker | 本地 multilingual-e5 embedding |
 | 外部服务 | GitHub 查询和通用网页搜索，按工具调用触发 |
 
@@ -84,6 +90,8 @@ flowchart TB
         Composer[Composer]
         Message[Message]
         Trace[AgentTrace]
+        TrajectoryUI[TrajectoryWorkspace]
+        RagUI[RagManager]
         Manager[AgentManager]
     end
 
@@ -98,11 +106,13 @@ flowchart TB
         Parser[agent/parser]
         Tools[agent/tools]
         MemoryRepo[memory/repository]
+        RagRepo[rag/repository]
         Consolidator[memory/consolidator]
         MemoryTools[memory/tools]
         SkillRepo[skills/repository]
         Matcher[skills/matcher]
         SessionRepo[sessions/repository]
+        TrajectoryRepo[trajectory/repository]
     end
 
     subgraph Infra["基础设施"]
@@ -120,8 +130,10 @@ flowchart TB
     Main --> MentionParser
     Main --> Scheduler
     Main --> MemoryRepo
+    Main --> RagRepo
     Main --> SkillRepo
     Main --> SessionRepo
+    Main --> TrajectoryRepo
     Main --> Consolidator
 
     AgentContext --> MemoryRepo
@@ -138,9 +150,11 @@ flowchart TB
 
     MemoryRepo --> Database
     MemoryRepo --> Embedding
+    RagRepo --> Embedding
     Embedding --> Worker
     SkillRepo --> Database
     AgentProfiles --> Database
+    TrajectoryRepo --> Database
     Scheduler --> Runner
 ```
 
@@ -179,11 +193,13 @@ stateDiagram-v2
 | `baseUrl` | OpenAI 兼容服务地址 | localStorage |
 | `currentModel` | 当前模型 | localStorage |
 | `agentMode` | 普通/Agent 模式 | localStorage |
+| `ragEnabled` | 是否自动检索并注入 RAG 知识库 | localStorage |
 | `sessionId` | 当前会话及 Memory namespace | localStorage |
 | `sessions` | 历史会话列表 | IndexedDB 派生 |
 | `history` | 当前会话对话历史 | IndexedDB `sessions` |
 | `attachments` | 待发送图片 Data URL | 内存 |
 | `memoryCount` | 当前有效 Memory 数量 | IndexedDB 派生 |
+| `ragCount` | 全局 RAG 文档数量 | IndexedDB 派生 |
 | `skillCount` | 当前启用 Skill 数量 | 内置清单 + IndexedDB 派生 |
 | `running` | 是否正在生成 | 内存 |
 | `status` | 连接与运行状态 | 内存 |
@@ -199,13 +215,18 @@ sequenceDiagram
     participant API as api/openai
     participant L as vLLM
     participant MR as MemoryRepository
+    participant RAG as RagRepository
     participant BG as Background Consolidator
 
     U->>C: 输入文字 / 图片
     C->>M: onSubmit(text, attachments)
     M->>M: 构造 ChatMessage / ContentPart
     M->>V: 添加用户消息与 Assistant 占位
-    M->>API: streamChat(history)
+    opt RAG 开关开启
+        M->>RAG: 混合召回 + MMR Top 6
+        RAG-->>M: 带 [R1] 来源的上下文
+    end
+    M->>API: streamChat(system RAG context + history)
     API->>L: POST /v1/chat/completions
     loop SSE delta
         L-->>API: data: chunk
@@ -224,7 +245,8 @@ sequenceDiagram
 普通模式特点：
 
 - 图片只在普通模式发送；
-- `<think>` 与最终回答分区渲染；
+- `<think>` 与最终回答分区渲染；完整回答使用 `marked` 解析 GFM，并经
+  `DOMPurify` 消毒后写入 DOM，流式阶段保持纯文本；
 - 用户点击停止时通过 `AbortController` 中断；
 - 后台巩固不阻塞最终答案展示。
 
@@ -235,9 +257,11 @@ flowchart LR
     Goal[用户 Goal]
 
     Goal --> MemorySearch[MemoryRepository.search<br/>Top 6]
+    Goal --> RagSearch[RagRepository.search<br/>开关开启时 Top 6]
     Goal --> SkillList[SkillRepository.list]
 
     MemorySearch --> MemoryPrompt[formatMemoryContext<br/>最多 5000 字符]
+    RagSearch --> RagPrompt[formatRagContext<br/>最多 7000 字符]
     SkillList --> Match[matchSkills<br/>Core + Top 3]
     Match --> SkillPrompt[formatSkillContext]
     Match --> Allowed[allowedTools 并集]
@@ -249,6 +273,7 @@ flowchart LR
     Allowed --> Filter
 
     MemoryPrompt --> Context[AgentContext]
+    RagPrompt --> Context
     SkillPrompt --> Context
     Filter --> Context
     Context --> Runner[runAgent]
@@ -257,9 +282,11 @@ flowchart LR
 `prepareAgentContext()` 并行执行 Memory 检索与 Skill 加载，然后生成：
 
 - `memories`：召回结果及相关性分数；
+- `ragMatches`：开关开启时召回的知识库 chunk；
 - `skills`：本次激活的 Skill；
 - `tools`：本次唯一可执行的工具注册表；
 - `memoryPrompt`：格式化后的长期记忆；
+- `ragPrompt`：带 `[R1]` 来源标签的知识库上下文；
 - `skillPrompt`：Skill 指令、触发词和工具权限。
 
 ### 多 Agent 基础模块
@@ -292,13 +319,14 @@ flowchart LR
 当前已实现：
 
 - `agents/types.ts`：`AgentProfile`、`AgentTask`、进度和 Scheduler 事件契约；
-- `agents/builtins.ts`：研究员、代码员和评审员三个内置角色；
+- `agents/builtins.ts`：研究员、代码员、评审员和极简 Agent 四个内置角色；
 - `agents/repository.ts`：内置覆盖、自定义角色、启停、删除和 IndexedDB 持久化；
 - `agents/mention-parser.ts`：只解析消息开头的路由 mention，支持角色名称、显示名、别名、`@/＠` 和 `:/：`；
 - `agents/scheduler.ts`：默认并发上限 3，每任务独立 `AbortController`，支持排队、进度、订阅、取消、清理和等待空闲；
 - Scheduler 通过 `AgentTaskRunner` 注入执行器，不直接依赖 ReAct runner。
 
 Agent Profile 管理 UI 已接入页头 `Agents` 入口；Composer 输入 `@` 时使用 `suggestAgentProfiles()` 展示和过滤角色候选。发送 `@角色 任务` 后，`parseAgentMention()` 将任务提交给 Scheduler，Scheduler 注入独立 `runAgent()` 并由 TaskWorkspace 展示进度。
+`@minimal` 只允许 `get_time` 与 `run_js`，用于对照测试模型在最小工具面下的表现。
 
 运行约束：
 
@@ -308,7 +336,8 @@ Agent Profile 管理 UI 已接入页头 `Agents` 入口；Composer 输入 `@` �
 - 任务捕获提交时的 `sessionId`，Memory 不随主会话切换而串写；
 - 成功结果幂等发布到任务所属会话的主聊天历史；若用户已切换会话，则通过 SessionRepository 原子追加到原会话；
 - 子 Agent 不修改主聊天 `running` 状态，Composer 可继续提交其他任务；
-- 当前任务和进度只保存在页面内存中，刷新后不恢复。
+- Scheduler 的队列与任务状态只保存在页面内存中，刷新后不恢复；执行过程会作为
+  append-only Trajectory 持久化，可在刷新后查看和回放。
 
 ## 7. ReAct Agent 循环
 
@@ -357,7 +386,24 @@ Runner 的硬约束：
 - 未被 Skill 允许的工具不可执行；
 - 网络工具连续失败 2 次后熔断；
 - 最多运行 8 个 step；
-- 所有 UI 更新通过判别联合 `AgentEvent` 推送。
+- 所有 UI 更新通过判别联合 `AgentEvent` 推送；
+- `metrics` 事件报告 step、工具调用、模型/工具耗时、估算输出 token 和估算 tokens/s；
+- token 指标由输出字符数近似计算，不冒充服务端精确 usage。
+
+### Trajectory 持久化与回放
+
+主 Agent 和子 Agent 都通过 `TrajectoryWriter` 顺序追加以下事件：
+
+```text
+run-start → context → step-start → step-end → metrics
+          → observation / ... → final|error → run-end
+```
+
+- 事件按 `runId + sequence` 形成稳定主键，写入后不原地修改；
+- 高频 `stream` 事件不落库，避免逐 token 写 IndexedDB；稳定的 step 快照完整保留轨迹；
+- Context 事件保留实际注入的 Memory/Skill/Tool，但移除 Memory embedding；
+- Observation 不持久化 HTML，只保留模型看到的文本；
+- `TrajectoryWorkspace` 按 session 列出主/子 Agent 运行，并可从事件流定时回放 `AgentTrace`。
 
 ## 8. 工具体系
 
@@ -375,6 +421,7 @@ flowchart TB
         JS[run_js]
         Time[get_time]
         Mermaid[render_mermaid]
+        CodeMode[code_mode]
     end
 
     subgraph MemoryTools["Memory 工具"]
@@ -406,8 +453,13 @@ flowchart TB
 | `run_js` | 浏览器主线程 | `new Function`，无 DOM/网络注入 |
 | `get_time` | 浏览器主线程 | 当前时间与时区 |
 | `render_mermaid` | 浏览器动态 import | Mermaid SVG |
+| `code_mode` | 浏览器主线程 | 单次 Action 顺序执行最多 4 个已授权本地工具；支持结构化结果引用 |
 | `memory_search` | IndexedDB + 本地 embedding | 主动检索长期 Memory |
 | `memory_save` | IndexedDB | 保存偏好或事实 |
+
+`code_mode` 只嵌套 `run_js`、`get_time`、`memory_search`、`render_mermaid`。
+它不执行任意 TypeScript，不递归调用自身，也不嵌套网络工具或 `memory_save`，
+因此不会绕过网络熔断和写入权限。
 
 ## 9. Memory 读取链路
 
@@ -423,7 +475,9 @@ flowchart TD
     Support[重要度 + 置信度<br/>时间衰减 + 访问频率]
     Hybrid[混合评分]
     Filter[词法命中或语义 >= 0.48]
-    TopK[排序并取 Top K]
+    Recall[排序取召回池 RECALL_K]
+    Rerank[MMR 精排去冗余<br/>无向量时按粗排截断]
+    TopK[取 Top K]
     Touch[更新 accessCount / lastAccessedAt]
 
     Query --> Ready
@@ -436,7 +490,7 @@ flowchart TD
     Lexical --> Hybrid
     Semantic --> Hybrid
     Support --> Hybrid
-    Hybrid --> Filter --> TopK --> Touch
+    Hybrid --> Filter --> Recall --> Rerank --> TopK --> Touch
 ```
 
 评分规则：
@@ -448,6 +502,60 @@ score = semantic * 0.58 + lexical * 0.27 + support * 0.15
 fallback:
 score = lexical * 0.78 + support * 0.22
 ```
+
+检索分两阶段：
+
+- 阶段一（召回）：按上面的混合评分排序，取较大候选池 `RECALL_K`（默认 20）。
+- 阶段二（精排 rerank）：本地向量就绪且候选多于 limit 时，用 MMR
+  `mmr = λ * semantic - (1 - λ) * max_redundancy`（默认 `λ = 0.7`）在相关性与多样性间平衡，
+  去掉高度同质的记忆，避免挤占注入预算；向量未就绪时安全降级为按粗排截断。
+- rerank 仅复用已有 e5 向量做余弦计算，无额外模型与网络；阶段二被隔离成单点，
+  未来可平滑替换为 cross-encoder。
+
+### RAG 自动工作流
+
+RAG 与 Memory 使用同一个本地 E5 服务，但数据和检索策略相互独立：
+
+```mermaid
+flowchart LR
+    Import[导入 TXT / MD / JSON / CSV / LOG]
+    Chunk[按段落和 Markdown 标题分块<br/>目标 1200 字符 / 重叠 180]
+    Embed[passage embedding]
+    Store[(ragDocuments / ragChunks)]
+    Toggle{接入 RAG?}
+    Query[用户问题]
+    Recall[semantic 0.7 + lexical 0.3<br/>Top 24]
+    MMR[MMR λ=0.75<br/>Top 6]
+    Prompt[最多 7000 字符<br/>来源标签 R1...Rn]
+    LLM[普通 Chat / 主 Agent / 子 Agent]
+
+    Import --> Chunk --> Embed --> Store
+    Query --> Toggle
+    Toggle -- 否 --> LLM
+    Toggle -- 是 --> Recall
+    Store --> Recall --> MMR --> Prompt --> LLM
+```
+
+- 知识库对同一 origin 下的所有会话全局共享；
+- 开关保存在 localStorage，关闭时不查询 RAG store，也不调用 query embedding；
+- 候选必须词法命中或语义相似度不低于 `0.45`；
+- 注入文本被明确标记为“不可信参考数据”，不能覆盖系统指令；
+- 模型被要求使用 `[R1]` 等标签引用依据，知识库不足时明确说明；
+- 当前只处理文本格式，不解析 PDF、Office 或图片 OCR。
+
+RAG 面板提供两层质量检测：
+
+1. 单查询召回调试器：选择 Top-K 后展示最终排名、文档、chunk 编号、
+   semantic、lexical、hybrid score，并可展开检查原始 chunk。
+2. 持久化测试问题集：每个问题人工指定一个期望文档，批量执行后计算：
+
+```text
+Recall@K = Top-K 命中期望文档的问题数 / 问题总数
+MRR      = Σ(1 / 首次命中排名) / 问题总数，未命中记为 0
+```
+
+评测采用确定性的检索结果，不使用 LLM 充当裁判。当前相关性标注粒度为“文档”，
+即同一文档的任意 chunk 进入 Top-K 都视为命中。
 
 ## 10. Memory 写入与时序更新
 
@@ -545,7 +653,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
     Goal[用户 Goal]
-    Builtins[5 个内置 Skills]
+    Builtins[6 个内置 Skills]
     Overrides[(IndexedDB<br/>覆盖与自定义)]
     Merge[SkillRepository.list]
     Enabled[过滤 enabled]
@@ -576,7 +684,8 @@ flowchart LR
 
 | Skill | 激活方式 | 主要工具 |
 |---|---|---|
-| Core Agent | 始终激活 | `get_time`、`run_js`、Memory 工具 |
+| Core Agent | 始终激活 | `get_time`、`run_js`、`code_mode`、Memory 工具 |
+| Engineering Discipline | 代码/实现/修复/review 等触发词 | `run_js`、`code_mode`、`memory_search` |
 | GitHub Research | GitHub/release/tag 等触发词 | `github_search`、`fetch_url` |
 | Web Research | 搜索/网页/latest 等触发词 | `web_search`、`fetch_url` |
 | Data Analysis | 计算/统计/分析等触发词 | `run_js` |
@@ -667,8 +776,49 @@ erDiagram
         datetime updatedAt
     }
 
+    TRAJECTORY_EVENT {
+        string id PK
+        string runId
+        string sessionId
+        int sequence
+        datetime at
+        object event
+    }
+
+    RAG_DOCUMENT {
+        string id PK
+        string name
+        string mimeType
+        int size
+        int chunkCount
+        datetime createdAt
+        datetime updatedAt
+    }
+
+    RAG_CHUNK {
+        string id PK
+        string documentId FK
+        string documentName
+        int index
+        string heading
+        string content
+        float_array embedding
+        string embeddingModel
+    }
+
+    RAG_EVAL_CASE {
+        string id PK
+        string question
+        string expectedDocumentId FK
+        string expectedDocumentName
+        datetime createdAt
+    }
+
     SESSION ||--o{ MEMORY : owns
+    SESSION ||--o{ TRAJECTORY_EVENT : records
     MEMORY ||--o| MEMORY : supersedes
+    RAG_DOCUMENT ||--|{ RAG_CHUNK : contains
+    RAG_DOCUMENT ||--o{ RAG_EVAL_CASE : expected_by
 ```
 
 IndexedDB：
@@ -676,12 +826,15 @@ IndexedDB：
 | 配置 | 值 |
 |---|---|
 | 数据库 | `vllm-agent` |
-| 当前版本 | `4` |
-| Object Store | `memories`、`skills`、`sessions`、`agentProfiles` |
+| 当前版本 | `7` |
+| Object Store | `memories`、`skills`、`sessions`、`agentProfiles`、`trajectoryEvents`、`ragDocuments`、`ragChunks`、`ragEvalCases` |
 | Memory 索引 | `kind`、`updatedAt`、`namespace`、`validTo` |
 | Skill 索引 | `enabled`、`updatedAt` |
 | Session 索引 | `updatedAt` |
 | Agent Profile 索引 | `enabled`、`updatedAt` |
+| Trajectory 索引 | `sessionId`、`runId`、`at` |
+| RAG 索引 | Document `updatedAt`；Chunk `documentId` |
+| RAG 评测索引 | `expectedDocumentId`、`createdAt` |
 
 注意：IndexedDB 按 origin 隔离。`127.0.0.1:8899` 和 `127.0.0.1:8900` 拥有不同的数据。
 
@@ -694,6 +847,8 @@ IndexedDB：
 - Memory 的读取、写入、检索、去重、统计和清空只作用于当前 session；
 - 后台 consolidation 捕获发起时的 session，避免异步跨会话写入；
 - Skills 是全局能力配置，不按 session 复制。
+- Trajectory 按 session 查询、按 runId 回放，采用 append-only 事件记录。
+- RAG 文档与 chunk 全局共享，由独立开关决定是否参与当前请求。
 
 ## 14. UI 组件关系
 
@@ -707,7 +862,9 @@ flowchart TB
     Composer[Composer]
     MentionMenu[Mention Menu]
     TaskWorkspace[TaskWorkspace]
+    TrajectoryWorkspace[TrajectoryWorkspace]
     Manager[AgentManager]
+    RagManager[RagManager]
     UserMsg[User Message]
     AssistantMsg[Assistant Message]
     AgentMsg[Agent Message]
@@ -720,7 +877,9 @@ flowchart TB
     Root --> Composer
     Composer --> MentionMenu
     Root --> TaskWorkspace
+    Root --> TrajectoryWorkspace
     Root --> Manager
+    Root --> RagManager
     Chat --> UserMsg
     Chat --> AssistantMsg
     Chat --> AgentMsg
@@ -734,6 +893,9 @@ flowchart TB
 - 组件通过 callback 向 `main.ts` 上报用户事件；
 - `main.ts` 修改状态后调用 `render()` 单向刷新；
 - AgentTrace 只消费 `AgentEvent`，不访问 Runner 内部状态。
+- TrajectoryWorkspace 从 IndexedDB 读取历史事件，并复用 AgentTrace 做回放。
+- RagManager 负责文本导入、索引进度、召回调试、测试集评估、文档统计和删除，
+  不直接调用模型服务。
 
 ## 15. 构建与运行
 

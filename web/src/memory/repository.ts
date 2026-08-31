@@ -1,5 +1,6 @@
 import { openDatabase, requestResult, STORES, transactionDone } from "../storage/database";
 import { cosineSimilarity, localEmbedding, type EmbeddingStatus } from "./embedding";
+import { lexicalOverlapScore, mmrSelect, tokenize } from "../retrieval/scoring";
 import type {
   MemoryInput,
   MemoryKind,
@@ -12,6 +13,8 @@ import type {
 const MAX_CONTENT_CHARS = 6000;
 const DAY_MS = 86_400_000;
 const EMBEDDING_MODEL = "Xenova/multilingual-e5-small";
+const RECALL_K = 20; // 阶段一召回候选池大小
+const MMR_LAMBDA = 0.7; // rerank 相关性权重（1 - λ 为多样性权重）
 
 function newId(): string {
   return crypto.randomUUID?.() ?? `mem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -47,30 +50,12 @@ function normalizeRecord(record: Partial<MemoryRecord> & Pick<MemoryRecord, "id"
   };
 }
 
-function tokenize(text: string): Set<string> {
-  const normalized = text.toLowerCase();
-  const tokens = normalized.match(/[a-z0-9][a-z0-9._-]*|[\u4e00-\u9fff]+/g) ?? [];
-  const result = new Set<string>();
-  for (const token of tokens) {
-    if (/^[\u4e00-\u9fff]+$/.test(token)) {
-      if (token.length === 1) result.add(token);
-      for (let i = 0; i < token.length - 1; i++) result.add(token.slice(i, i + 2));
-    } else if (token.length > 1) {
-      result.add(token);
-    }
-  }
-  return result;
-}
-
 function lexicalScore(queryTokens: Set<string>, record: MemoryRecord): number {
-  if (!queryTokens.size) return 0;
-  const memoryTokens = tokenize(`${record.title} ${record.content} ${record.tags.join(" ")}`);
-  let overlap = 0;
-  for (const token of queryTokens) if (memoryTokens.has(token)) overlap++;
-  if (!overlap) return 0;
-  const coverage = overlap / queryTokens.size;
-  const precision = overlap / Math.max(memoryTokens.size, 1);
-  return coverage * 0.8 + precision * 0.2;
+  return lexicalOverlapScore(
+    queryTokens,
+    `${record.title} ${record.content} ${record.tags.join(" ")}`,
+    0.8,
+  );
 }
 
 function supportScore(record: MemoryRecord): number {
@@ -81,6 +66,27 @@ function supportScore(record: MemoryRecord): number {
     + record.confidence * 0.25
     + recency * 0.2
     + frequency * 0.1;
+}
+
+/**
+ * MMR 重排：在相关性与多样性之间平衡，避免注入 LLM 的记忆高度同质、
+ * 挤占上下文预算。relevance 与冗余项同为余弦量纲，仅用已有向量，无额外模型。
+ */
+function mmrRerank(
+  candidates: Array<{ record: MemoryRecord; score: number; semantic: number }>,
+  limit: number,
+  lambda = MMR_LAMBDA,
+): MemoryMatch[] {
+  return mmrSelect(
+    candidates,
+    limit,
+    lambda,
+    (candidate) => candidate.semantic,
+    (candidate, chosen) =>
+      candidate.record.embedding && chosen.record.embedding
+        ? cosineSimilarity(candidate.record.embedding, chosen.record.embedding)
+        : 0,
+  ).map(({ record, score }) => ({ record, score }));
 }
 
 export class MemoryRepository {
@@ -281,7 +287,8 @@ export class MemoryRepository {
         if (!record.embedding || record.embeddingModel !== EMBEDDING_MODEL) void this.indexRecord(record);
       }
     }
-    const matches = records
+    // 阶段一 · 召回：混合评分粗排，取较大候选池（保留 semantic 供 rerank 用）
+    const recalled = records
       .map((record) => {
         const lexical = lexicalScore(queryTokens, record);
         const semantic = queryVector && record.embedding
@@ -295,8 +302,12 @@ export class MemoryRepository {
       })
       .filter((match) => match.lexical > 0 || match.semantic >= 0.48)
       .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map(({ record, score }) => ({ record, score }));
+      .slice(0, RECALL_K);
+
+    // 阶段二 · 精排：有语义向量时用 MMR 去冗余，否则按粗排截断（安全降级）
+    const matches = queryVector && recalled.length > limit
+      ? mmrRerank(recalled, limit)
+      : recalled.slice(0, limit).map(({ record, score }) => ({ record, score }));
 
     const accessedAt = new Date().toISOString();
     for (const match of matches) {
