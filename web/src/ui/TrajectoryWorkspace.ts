@@ -140,6 +140,7 @@ export function createTrajectoryWorkspace(repository: TrajectoryRepository) {
       setOpen(true);
       await load(nextSessionId);
     },
+    close: () => setOpen(false),
     refresh: (nextSessionId: string) => load(nextSessionId),
   };
 }

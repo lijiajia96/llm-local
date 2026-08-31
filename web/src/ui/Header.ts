@@ -6,6 +6,7 @@ export type HeaderModel = {
   models: string[];
   currentModel: string;
   agentMode: boolean;
+  flowEnabled: boolean;
   ragEnabled: boolean;
   sessionId: string;
   sessions: Array<{ id: string; title: string }>;
@@ -21,6 +22,7 @@ export type HeaderCallbacks = {
   onBaseUrlChange: (v: string) => void;
   onModelChange: (v: string) => void;
   onAgentToggle: (v: boolean) => void;
+  onFlowToggle: (v: boolean) => void;
   onRagToggle: (v: boolean) => void;
   onRefresh: () => void;
   onSessionChange: (id: string) => void;
@@ -30,6 +32,7 @@ export type HeaderCallbacks = {
   onManageRag: () => void;
   onManageSkills: () => void;
   onManageTrajectories: () => void;
+  onManageWorkflows: () => void;
 };
 
 export function createHeader(cb: HeaderCallbacks) {
@@ -58,7 +61,7 @@ export function createHeader(cb: HeaderCallbacks) {
     { className: "switch", title: "开启后模型会以 ReAct 循环调用工具" },
     agentInput,
     h("span", { className: "switch-track" }, h("span", { className: "switch-thumb" })),
-    h("span", { className: "switch-label" }, "Agent 模式"),
+    h("span", { className: "switch-label" }, "Agent"),
   );
   const ragInput = h("input", { type: "checkbox" }) as HTMLInputElement;
   ragInput.addEventListener("change", () => cb.onRagToggle(ragInput.checked));
@@ -67,7 +70,16 @@ export function createHeader(cb: HeaderCallbacks) {
     { className: "switch", title: "开启后每次提问自动检索并注入 RAG 知识库" },
     ragInput,
     h("span", { className: "switch-track" }, h("span", { className: "switch-thumb" })),
-    h("span", { className: "switch-label" }, "接入 RAG"),
+    h("span", { className: "switch-label" }, "RAG"),
+  );
+  const flowInput = h("input", { type: "checkbox" }) as HTMLInputElement;
+  flowInput.addEventListener("change", () => cb.onFlowToggle(flowInput.checked));
+  const flowToggle = h(
+    "label",
+    { className: "switch", title: "由 Planner 生成任务 DAG，并行调度多个 Agent" },
+    flowInput,
+    h("span", { className: "switch-track" }, h("span", { className: "switch-thumb" })),
+    h("span", { className: "switch-label" }, "Flow"),
   );
 
   const sessionSelect = h(
@@ -114,6 +126,11 @@ export function createHeader(cb: HeaderCallbacks) {
     },
     "Traces",
   );
+  const workflowsBtn = h(
+    "button",
+    { className: "icon-btn ghost", title: "查看 Dynamic Flow 任务图", onClick: cb.onManageWorkflows },
+    "Flows",
+  );
 
   const statusText = h("span", { className: "status-text" });
 
@@ -145,7 +162,9 @@ export function createHeader(cb: HeaderCallbacks) {
       ragBtn,
       skillsBtn,
       trajectoriesBtn,
+      workflowsBtn,
       ragToggle,
+      flowToggle,
       agentToggle,
     ),
   );
@@ -165,6 +184,7 @@ export function createHeader(cb: HeaderCallbacks) {
     }
     modelSelect.value = m.currentModel;
     agentInput.checked = m.agentMode;
+    flowInput.checked = m.flowEnabled;
     ragInput.checked = m.ragEnabled;
     const sessionSignature = m.sessions.map((session) => `${session.id}:${session.title}`).join("|");
     if (sessionSelect.dataset.signature !== sessionSignature) {

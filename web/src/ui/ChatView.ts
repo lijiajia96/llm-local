@@ -33,6 +33,12 @@ export function createChatView(): ChatViewApi {
           h("span", { className: "empty-state__hint-key" }, "🤖 Agent 模式"),
           h("span", {}, "ReAct 循环：模型自主调用工具完成任务"),
         ),
+        h(
+          "div",
+          { className: "empty-state__hint" },
+          h("span", { className: "empty-state__hint-key" }, "Flow 模式"),
+          h("span", {}, "Planner 生成 DAG，多 Agent 并行执行并汇总"),
+        ),
       ),
     ),
   );

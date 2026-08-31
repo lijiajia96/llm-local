@@ -10,7 +10,7 @@
 ![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
 ![vLLM](https://img.shields.io/badge/vLLM-Compatible-4B8BBE)
 
-一个使用 Vite + TypeScript 构建的本地优先浏览器端 Agent Runtime，直连 OpenAI 兼容 vLLM，支持 SSE 流式聊天、图片输入、ReAct Tools、Local Memory、Skills、历史会话和 `@角色` 多 Agent 并行任务。
+一个使用 Vite + TypeScript 构建的本地优先浏览器端 Agent Runtime，直连 OpenAI 兼容 vLLM，支持 SSE 流式聊天、图片输入、ReAct Tools、Local Memory、Skills、历史会话、`@角色` 多 Agent 并行任务，以及能够学习和召回成功编排经验的 Dynamic Flow。
 
 A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial covering OpenAI-compatible streaming, ReAct tools, agent memory, skills, sessions, and observable parallel agents.
 
@@ -57,6 +57,7 @@ A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial cove
 - **权限由 Runtime 强制执行**：Skill Manifest、Tool Registry、运行时白名单、重复调用拦截和网络熔断；
 - **实现 Local Memory OS**：IndexedDB、multilingual-e5、本地 embedding、混合检索、后台巩固和时序事实；
 - **实现可观察多 Agent**：`@角色` 路由、Agent Profile、有界并发、独立取消、Tasks UI 和结果回写；
+- **实现可学习 Dynamic Flow**：Planner 生成 DAG、并行 fan-out/fan-in、Critic 成功校验、Flow Skill 语义召回与复用；
 - **提供完整实践体系**：课堂实验、故障注入、测试路线、综合项目、评分标准和上线检查表。
 
 ### 学习路线
@@ -146,6 +147,77 @@ flowchart LR
 - Agent、Memory 和 Skills 均提供可视化管理入口；
 - 网络搜索支持 Jina、BBC/Bing RSS 和 GitHub REST API 降级链路。
 
+### 可学习 Dynamic Flow
+
+- Planner 根据目标和 Agent metadata 生成受控 DAG，最多 8 个节点、4 层依赖；
+- 节点通过 `requiredSkillIds` 和 `requiredTools` 显式声明能力，不根据角色名称推断权限；
+- Flow 完成后由独立 Critic 检查节点证据与最终答案，只有质量分不低于 `0.8` 才能沉淀；
+- Flow Skill 保存自然语言描述、触发示例、DAG 示例和能力约束；
+- 新任务通过 E5 语义检索、词法匹配、质量分与 MMR 召回最多 3 个 Flow Skill；
+- 召回结果只作为 Planner 参考，任务参数、Agent 绑定和 DAG 合法性都会重新生成和校验。
+
+#### Flow 如何存储和复用
+
+Dynamic Flow 不保存为仓库中的 JSON 文件，而是写入浏览器 IndexedDB 数据库
+`vllm-agent`。其中包含两个不同用途的 Object Store：
+
+| Object Store | 内容 | 后续用途 |
+|---|---|---|
+| `workflowRuns` | 用户目标、实际 DAG、节点状态与输出、最终答案、质量评价、召回来源 | 查看和诊断一次具体执行 |
+| `workflowTemplates` | 可复用描述、触发示例、DAG 示例、能力约束、Embedding、质量分和成功次数 | 为后续相似任务提供规划参考 |
+
+一个实际的 Flow Skill 记录类似：
+
+```json
+{
+  "id": "flow-template-uuid",
+  "sourceRunId": "source-flow-run-id",
+  "name": "Parallel Calculation and Comparison",
+  "description": "两个独立计算并行执行，最后汇总并比较结果",
+  "triggerExamples": [
+    "分别计算两个表达式并比较结果",
+    "并行处理两组数值后判断哪个更大"
+  ],
+  "exampleGoal": "并行计算 8×7 和 9×6，然后比较结果",
+  "nodes": [
+    {
+      "id": "calculate-a",
+      "goalExample": "计算第一个表达式",
+      "requiredSkillIds": ["core-agent"],
+      "requiredTools": ["run_js"],
+      "dependsOn": []
+    },
+    {
+      "id": "compare-results",
+      "goalExample": "比较两个上游计算结果",
+      "requiredSkillIds": ["core-agent"],
+      "requiredTools": [],
+      "dependsOn": ["calculate-a", "calculate-b"]
+    }
+  ],
+  "embedding": ["384 维本地 E5 向量"],
+  "qualityScore": 1,
+  "successCount": 2,
+  "enabled": true,
+  "version": 1
+}
+```
+
+完整链路如下：
+
+```text
+Flow 执行完成
+→ Critic 核对目标、节点证据和最终答案
+→ success=true 且 qualityScore>=0.8
+→ 写入或强化 workflowTemplates
+→ 新任务对描述、触发示例和示例目标进行混合检索
+→ MMR 选择最多 3 个 Flow Skill
+→ Planner 参考模板重新生成并校验当前 DAG
+```
+
+这里的 Flow Skill 不是可以直接执行的固定函数。它保存的是经过验证的编排经验；具体参数和
+Agent 绑定仍由 Planner 根据当前请求与显式能力 metadata 重新生成，避免把历史参数或失效角色直接复制到新任务。
+
 ### Local Memory OS
 
 - 支持 `preference`、`fact`、`episode` 三类记忆；
@@ -203,6 +275,14 @@ Scheduler 会在并发上限内同时运行任务。Tasks 面板独立展示每�
 任务完成后，最终答案会以带角色标识的消息回写到原主会话；切换会话不会导致结果串写。
 
 ![子 Agent 结果回写主会话](./docs/images/web-subagent-results.png)
+
+### Dynamic Flow 学习与召回测试
+
+第一次运行“并行计算两个表达式并比较结果”时，没有历史模板，Planner 动态生成两个并行计算节点和一个汇总节点。Critic 根据节点结果和最终答案判定质量为 `100%`，随后将其沉淀为 `Parallel Calculation and Comparison` Flow Skill。
+
+第二次使用不同数字提交同构任务时，本地 E5 混合检索命中该 Flow Skill，匹配度为 `74%`。Planner 参考其拓扑但重新生成当前参数对应的节点，完成 `12×4=48`、`7×9=63` 以及 `48 < 63` 的验证。模板成功次数更新为 2。
+
+![Dynamic Flow 学习、召回与复用测试](./docs/images/dynamic-flow-reuse.png)
 
 ## 子 Agent 运行示例
 

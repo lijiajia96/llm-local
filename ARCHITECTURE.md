@@ -1,6 +1,6 @@
 # vLLM Chat Agent 架构
 
-> 最后同步：2026-08-27
+> 最后同步：2026-08-31
 >
 > 架构源码：`web/src/`
 >
@@ -15,6 +15,7 @@
 - 通过 OpenAI 兼容 API 直连 vLLM；
 - 普通模式支持文字、图片和 SSE 流式输出；
 - Agent 模式使用文本协议实现 ReAct 工具循环；
+- Dynamic Flow 可由 Planner 生成受控任务 DAG，并行调度多个 Agent 后统一汇总；
 - Memory 按 session 隔离，Skills 和用户配置保存在浏览器本地；
 - 可选的本地 RAG 知识库支持自动分块、索引、检索和引用；
 - 本地语义模型通过 Web Worker + ONNX/WASM 运行；
@@ -30,10 +31,11 @@ flowchart LR
         UI[UI Components]
         Main[main.ts<br/>状态与编排]
         Agent[Agent Runtime]
+        Flow[Dynamic Flow Runtime]
         Memory[Local Memory OS]
         RAG[Local RAG Pipeline]
         Skills[Skill Registry]
-        IDB[(IndexedDB<br/>Memory / Skills / Sessions / Trajectory)]
+        IDB[(IndexedDB<br/>Memory / Skills / Sessions / Trajectory / Flow)]
         Worker[Embedding Web Worker]
         Cache[(Browser Cache)]
     end
@@ -51,6 +53,7 @@ flowchart LR
     User --> UI
     UI --> Main
     Main --> Agent
+    Main --> Flow
     Main --> Memory
     Main --> RAG
     Main --> Skills
@@ -58,6 +61,8 @@ flowchart LR
     Agent -->|ReAct step| VLLM
     Agent --> GitHub
     Agent --> Jina
+    Flow --> Agent
+    Flow <--> IDB
     Memory <--> IDB
     RAG <--> IDB
     Skills <--> IDB
@@ -74,7 +79,7 @@ flowchart LR
 |---|---|
 | 浏览器 | UI、状态、Agent、Memory、RAG、Skills、工具编排 |
 | vLLM | 模型列表、普通对话、Agent step、后台 Memory 抽取 |
-| IndexedDB | Memory、RAG 文档/chunk、会话、自定义/覆盖 Skill 与 append-only Trajectory 的持久化 |
+| IndexedDB | Memory、RAG 文档/chunk、会话、Skill、Trajectory 与 Dynamic Flow 运行状态的持久化 |
 | Web Worker | 本地 multilingual-e5 embedding |
 | 外部服务 | GitHub 查询和通用网页搜索，按工具调用触发 |
 
@@ -193,6 +198,7 @@ stateDiagram-v2
 | `baseUrl` | OpenAI 兼容服务地址 | localStorage |
 | `currentModel` | 当前模型 | localStorage |
 | `agentMode` | 普通/Agent 模式 | localStorage |
+| `flowEnabled` | 是否由 Planner 生成并执行动态 DAG | localStorage |
 | `ragEnabled` | 是否自动检索并注入 RAG 知识库 | localStorage |
 | `sessionId` | 当前会话及 Memory namespace | localStorage |
 | `sessions` | 历史会话列表 | IndexedDB 派生 |
@@ -338,6 +344,53 @@ Agent Profile 管理 UI 已接入页头 `Agents` 入口；Composer 输入 `@` �
 - 子 Agent 不修改主聊天 `running` 状态，Composer 可继续提交其他任务；
 - Scheduler 的队列与任务状态只保存在页面内存中，刷新后不恢复；执行过程会作为
   append-only Trajectory 持久化，可在刷新后查看和回放。
+
+### Dynamic Flow
+
+Dynamic Flow 采用 LangGraph/AutoGen GraphFlow 中的显式状态图和确定性执行模式：
+
+```mermaid
+flowchart LR
+    Goal[用户目标] --> Planner[vLLM Planner]
+    Goal --> Recall[Flow Skill 混合召回]
+    Recall --> Planner
+    Planner --> JSON[结构化 JSON Plan]
+    JSON --> Validate[Schema / Agent ACL / DAG 校验]
+    Validate --> Ready[计算 Ready Nodes]
+    Ready --> Scheduler[AgentTaskScheduler<br/>最大并发 3]
+    Scheduler --> Results[节点结果]
+    Results -->|依赖全部完成| Ready
+    Results --> Synthesis[Coordinator 汇总]
+    Synthesis --> Answer[最终 Markdown]
+    Answer --> Critic[业务成功 Critic]
+    Critic -->|score >= 0.8| Template[(workflowTemplates)]
+    Template --> Recall
+    Validate --> Store[(workflowRuns)]
+    Results --> Store
+    Answer --> Store
+```
+
+约束与语义：
+
+- Planner 生成 `summary/description/triggerExamples/nodes[]`，使用 vLLM JSON Object 结构化输出；格式或 Schema
+  校验失败时最多修复一次；
+- 每个节点固定
+  `id/title/goal/agentId/requiredSkillIds/requiredTools/dependsOn`；Agent 必须来自启用的
+  Profile，且显式声明的 Skill/Tool 能力必须满足；
+- 最多 8 个节点、依赖深度最多 4，拒绝未知依赖、自依赖和循环依赖；
+- 规划前使用 E5 语义分、词法分、质量分和历史成功次数混合召回 Flow Skill，Top 20
+  候选经过 MMR 后最多向 Planner 注入 3 个模板；
+- 模板只作为规划示例，Planner 必须替换任务参数、按当前 Agent metadata 重新绑定能力并重新校验 DAG；
+- 无依赖或依赖已全部完成的节点进入 ready 集合，同层节点通过 Scheduler 并行执行；
+- 下游节点只接收直接依赖节点的结果，并受 6000 字符预算限制；
+- 上游失败时后继节点标记为 `skipped`，不继续错误传播；
+- 停止 Flow 会取消所有正在运行的子任务；
+- 最终 Coordinator 在 18000 字符结果预算内统一汇总，不向聊天区发布中间子 Agent 答案；
+- 完成后由独立 Critic 根据目标、节点证据和最终答案判断业务是否真正成功；只有
+  `score >= 0.8` 的 Flow 才进入模板库；
+- `workflowRuns` 保存计划、召回来源、节点状态、质量判断和最终答案；
+  `workflowTemplates` 保存可复用描述、触发示例、DAG 示例、显式能力约束和成功次数；
+- Flow Workspace 提供“运行记录 / Flow Skills”两个视图，可跨刷新检查召回与学习证据。
 
 ## 7. ReAct Agent 循环
 
@@ -826,8 +879,8 @@ IndexedDB：
 | 配置 | 值 |
 |---|---|
 | 数据库 | `vllm-agent` |
-| 当前版本 | `7` |
-| Object Store | `memories`、`skills`、`sessions`、`agentProfiles`、`trajectoryEvents`、`ragDocuments`、`ragChunks`、`ragEvalCases` |
+| 当前版本 | `9` |
+| Object Store | `memories`、`skills`、`sessions`、`agentProfiles`、`trajectoryEvents`、`ragDocuments`、`ragChunks`、`ragEvalCases`、`workflowRuns`、`workflowTemplates` |
 | Memory 索引 | `kind`、`updatedAt`、`namespace`、`validTo` |
 | Skill 索引 | `enabled`、`updatedAt` |
 | Session 索引 | `updatedAt` |
@@ -835,6 +888,8 @@ IndexedDB：
 | Trajectory 索引 | `sessionId`、`runId`、`at` |
 | RAG 索引 | Document `updatedAt`；Chunk `documentId` |
 | RAG 评测索引 | `expectedDocumentId`、`createdAt` |
+| Dynamic Flow 索引 | `sessionId`、`updatedAt` |
+| Flow Skill 索引 | `enabled`、`sourceRunId`、`updatedAt` |
 
 注意：IndexedDB 按 origin 隔离。`127.0.0.1:8899` 和 `127.0.0.1:8900` 拥有不同的数据。
 
@@ -849,6 +904,8 @@ IndexedDB：
 - Skills 是全局能力配置，不按 session 复制。
 - Trajectory 按 session 查询、按 runId 回放，采用 append-only 事件记录。
 - RAG 文档与 chunk 全局共享，由独立开关决定是否参与当前请求。
+- Dynamic Flow 运行按 session 查询；节点任务轨迹继续写入 `trajectoryEvents`。
+- Flow Skills 是全局可复用模板，不按 session 隔离；只有通过 Critic 的成功 Flow 才会写入。
 
 ## 14. UI 组件关系
 

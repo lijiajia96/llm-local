@@ -5,6 +5,7 @@ export type TaskWorkspaceCallbacks = {
   onCancel: (taskId: string) => void;
   onRemove: (taskId: string) => void;
   onClearFinished: () => void;
+  onOpen?: () => void;
 };
 
 const STATUS_LABEL: Record<AgentTaskStatus, string> = {
@@ -91,7 +92,10 @@ export function createTaskWorkspace(cb: TaskWorkspaceCallbacks) {
     "Tasks ",
     h("span", {}, "0"),
   );
-  launcher.addEventListener("click", () => setOpen(true));
+  launcher.addEventListener("click", () => {
+    cb.onOpen?.();
+    setOpen(true);
+  });
   const el = h("div", { className: "task-workspace-host" }, panel, launcher);
 
   function setOpen(value: boolean) {
@@ -173,6 +177,9 @@ export function createTaskWorkspace(cb: TaskWorkspaceCallbacks) {
         "div",
         { className: "task-card__head" },
         h("span", { className: "task-card__role" }, profile?.displayName ?? task.agentId),
+        task.workflowNodeId
+          ? h("span", { className: "task-card__flow" }, `Flow · ${task.workflowNodeId}`)
+          : "",
         h("span", { className: "task-card__status" }, STATUS_LABEL[task.status]),
         h(
           "span",
@@ -181,7 +188,14 @@ export function createTaskWorkspace(cb: TaskWorkspaceCallbacks) {
         ),
         action,
       ),
-      h("div", { className: "task-card__goal" }, task.goal),
+      h(
+        "div",
+        { className: "task-card__goal" },
+        task.workflowId ? task.goal.split("\n\nUse these completed upstream")[0]! : task.goal,
+      ),
+      task.dependsOn?.length
+        ? h("div", { className: "task-card__deps" }, `依赖：${task.dependsOn.join(", ")}`)
+        : "",
       latest
         ? h(
             "div",
@@ -206,6 +220,7 @@ export function createTaskWorkspace(cb: TaskWorkspaceCallbacks) {
   return {
     el,
     open: () => setOpen(true),
+    close: () => setOpen(false),
     update(nextTasks: AgentTask[], nextProfiles: AgentProfile[]) {
       tasks = nextTasks;
       profiles = nextProfiles;

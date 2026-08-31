@@ -2,7 +2,7 @@ import "./styles/index.css";
 
 import { listModels, streamChat } from "./api/openai";
 import { prepareAgentContext } from "./agent/context";
-import { parseTrace } from "./agent/parser";
+import { parseTrace, stripThink } from "./agent/parser";
 import { runAgent, type AgentEvent } from "./agent/runner";
 import { CODE_MODE_TOOL_NAME, TOOLS } from "./agent/tools";
 import { parseAgentMention } from "./agents/mention-parser";
@@ -33,6 +33,7 @@ import {
   createAssistantMessage,
   createSubAgentResultMessage,
   createUserMessage,
+  createWorkflowMessage,
   formatSubAgentResult,
   parseSubAgentResult,
 } from "./ui/Message";
@@ -41,7 +42,13 @@ import { createAgentManager } from "./ui/AgentManager";
 import { createTaskWorkspace } from "./ui/TaskWorkspace";
 import { createTrajectoryWorkspace } from "./ui/TrajectoryWorkspace";
 import { createRagManager } from "./ui/RagManager";
+import { createWorkflowWorkspace } from "./ui/WorkflowWorkspace";
 import { h, loadPref, savePref } from "./ui/dom";
+import { executeWorkflow, createWorkflowRun } from "./workflow/executor";
+import { evaluateWorkflowForLearning, learnWorkflowTemplate } from "./workflow/learner";
+import { planWorkflow } from "./workflow/planner";
+import { WorkflowRepository } from "./workflow/repository";
+import { WorkflowTemplateRepository } from "./workflow/templateRepository";
 
 import { CHAT_TOKENS, DEFAULT_BASE_URL, STORAGE_KEYS } from "./config";
 
@@ -50,6 +57,7 @@ type AppState = {
   models: string[];
   currentModel: string;
   agentMode: boolean;
+  flowEnabled: boolean;
   ragEnabled: boolean;
   sessionId: string;
   sessions: SessionRecord[];
@@ -82,6 +90,7 @@ const state: AppState = {
   models: [],
   currentModel: loadPref(STORAGE_KEYS.model, ""),
   agentMode: loadPref(STORAGE_KEYS.agent, false),
+  flowEnabled: loadPref(STORAGE_KEYS.flow, false),
   ragEnabled: loadPref(STORAGE_KEYS.rag, false),
   sessionId: initialSessionId,
   sessions: [],
@@ -105,6 +114,8 @@ const skillRepository = new SkillRepository();
 const agentProfileRepository = new AgentProfileRepository();
 const trajectoryRepository = new TrajectoryRepository();
 const ragRepository = new RagRepository();
+const workflowRepository = new WorkflowRepository();
+const workflowTemplateRepository = new WorkflowTemplateRepository();
 const taskScheduler = new AgentTaskScheduler({
   maxConcurrency: 3,
   runner: runScheduledAgentTask,
@@ -131,10 +142,25 @@ const header = createHeader({
   },
   onAgentToggle(v) {
     state.agentMode = v;
+    if (!v) {
+      state.flowEnabled = false;
+      savePref(STORAGE_KEYS.flow, false);
+    }
     savePref(STORAGE_KEYS.agent, v);
     if (v) state.attachments = [];
     render();
     void safePersistCurrentSession();
+  },
+  onFlowToggle(v) {
+    state.flowEnabled = v;
+    if (v) {
+      state.agentMode = true;
+      state.attachments = [];
+      savePref(STORAGE_KEYS.agent, true);
+    }
+    savePref(STORAGE_KEYS.flow, v);
+    render();
+    setStatus("ok", v ? "Dynamic Flow 已开启" : "Dynamic Flow 已关闭");
   },
   onRagToggle(v) {
     state.ragEnabled = v;
@@ -149,7 +175,16 @@ const header = createHeader({
   onManageMemory: () => void manager.open("memory"),
   onManageRag: () => void ragManager.open(),
   onManageSkills: () => void manager.open("skills"),
-  onManageTrajectories: () => void trajectoryWorkspace.open(state.sessionId),
+  onManageTrajectories: () => {
+    taskWorkspace.close();
+    workflowWorkspace.close();
+    void trajectoryWorkspace.open(state.sessionId);
+  },
+  onManageWorkflows: () => {
+    taskWorkspace.close();
+    trajectoryWorkspace.close();
+    void workflowWorkspace.open(state.sessionId);
+  },
 });
 
 const composer = createComposer({
@@ -173,17 +208,30 @@ const taskWorkspace = createTaskWorkspace({
   onCancel: (taskId) => taskScheduler.cancel(taskId),
   onRemove: (taskId) => taskScheduler.remove(taskId),
   onClearFinished: () => taskScheduler.clearFinished(),
+  onOpen: () => {
+    trajectoryWorkspace.close();
+    workflowWorkspace.close();
+  },
 });
 const trajectoryWorkspace = createTrajectoryWorkspace(trajectoryRepository);
 const ragManager = createRagManager(ragRepository, () => void refreshAgentMetadata());
+const workflowWorkspace = createWorkflowWorkspace(
+  workflowRepository,
+  workflowTemplateRepository,
+);
 taskScheduler.subscribe((event) => {
   state.agentTasks = taskScheduler.listTasks();
   taskWorkspace.update(state.agentTasks, state.agentProfiles);
-  if (event.type === "task-added") taskWorkspace.open();
+  if (event.type === "task-added") {
+    trajectoryWorkspace.close();
+    workflowWorkspace.close();
+    taskWorkspace.open();
+  }
   if (
     event.type === "task-updated"
     && event.task.status === "completed"
     && event.task.result
+    && !event.task.workflowId
     && !publishedTaskIds.has(event.task.id)
   ) {
     publishedTaskIds.add(event.task.id);
@@ -199,6 +247,7 @@ root.append(
   taskWorkspace.el,
   trajectoryWorkspace.el,
   ragManager.el,
+  workflowWorkspace.el,
 );
 
 function render() {
@@ -207,6 +256,7 @@ function render() {
     models: state.models,
     currentModel: state.currentModel,
     agentMode: state.agentMode,
+    flowEnabled: state.flowEnabled,
     ragEnabled: state.ragEnabled,
     sessionId: state.sessionId,
     sessions: state.sessions,
@@ -255,7 +305,7 @@ async function switchSession(id: string) {
 async function activateSession(session: SessionRecord, statusText: string) {
   state.sessionId = session.id;
   state.history = structuredClone(session.history);
-  state.agentMode = session.agentMode;
+  state.agentMode = state.flowEnabled || session.agentMode;
   state.attachments = [];
   state.memoryCount = 0;
   savePref(STORAGE_KEYS.sessionId, session.id);
@@ -630,7 +680,13 @@ async function send(text: string, attachments: string[]) {
   } catch (err) {
     console.warn("Explicit memory save failed", err);
   }
-  if (state.agentMode) await sendAgent(text);
+  if (state.flowEnabled) {
+    if (attachments.length) {
+      setStatus("bad", "Dynamic Flow 暂不支持图片附件");
+      return;
+    }
+    await sendDynamicFlow(text);
+  } else if (state.agentMode) await sendAgent(text);
   else await sendChat(text, attachments);
 }
 
@@ -767,13 +823,125 @@ async function sendAgent(text: string) {
   }
 }
 
+async function sendDynamicFlow(text: string) {
+  state.history.push({ role: "user", content: text });
+  chatView.addMessage(createUserMessage(text, []));
+  state.running = true;
+  const controller = new AbortController();
+  currentController = controller;
+  setStatus("ok", "Dynamic Flow 规划中…");
+  await safePersistCurrentSession();
+
+  const message = createWorkflowMessage();
+  chatView.addMessage(message.el);
+  try {
+    setStatus("ok", "Dynamic Flow 正在召回相似模板…");
+    const templateMatches = await workflowTemplateRepository.search(text, 3);
+    setStatus(
+      "ok",
+      templateMatches.length
+        ? `Dynamic Flow 命中 ${templateMatches.length} 个模板，正在规划…`
+        : "Dynamic Flow 未命中模板，正在规划…",
+    );
+    const plan = await planWorkflow({
+      baseUrl: state.baseUrl,
+      model: state.currentModel,
+      goal: text,
+      agents: state.agentProfiles,
+      templates: templateMatches,
+      signal: controller.signal,
+    });
+    const run = createWorkflowRun({
+      sessionId: state.sessionId,
+      goal: text,
+      model: state.currentModel,
+      plan,
+      templateMatches,
+    });
+    await workflowRepository.put(run);
+    message.update(run);
+    setStatus("ok", `Dynamic Flow 执行中 · ${run.nodes.length} 个节点`);
+
+    const completed = await executeWorkflow({
+      run,
+      baseUrl: state.baseUrl,
+      scheduler: taskScheduler,
+      repository: workflowRepository,
+      signal: controller.signal,
+      onProgress: ({ run: current }) => {
+        message.update(current);
+        chatView.scrollToBottom();
+        const done = current.nodes.filter((node) =>
+          node.status === "completed"
+          || node.status === "failed"
+          || node.status === "skipped"
+        ).length;
+        setStatus("ok", `Dynamic Flow · ${done}/${current.nodes.length}`);
+      },
+    });
+    const answer = stripThink(completed.finalAnswer ?? "").trim();
+    if (!answer) throw new Error("Workflow did not produce a final answer");
+    completed.finalAnswer = answer;
+    await workflowRepository.put(completed);
+    message.update(completed);
+
+    setStatus("ok", "Dynamic Flow 正在评估可复用性…");
+    const evaluation = await evaluateWorkflowForLearning({
+      baseUrl: state.baseUrl,
+      model: state.currentModel,
+      run: completed,
+      signal: controller.signal,
+    });
+    try {
+      const learned = await learnWorkflowTemplate({
+        run: completed,
+        evaluation,
+        agents: state.agentProfiles,
+        repository: workflowTemplateRepository,
+      });
+      if (learned) {
+        completed.learnedTemplateId = learned.id;
+        completed.learnedTemplateName = learned.name;
+      }
+    } catch (learningError) {
+      console.warn("Workflow template learning failed", learningError);
+      completed.qualityScore = evaluation.score;
+      completed.qualityReason = `模板保存失败：${
+        learningError instanceof Error ? learningError.message : String(learningError)
+      }`;
+    }
+    await workflowRepository.put(completed);
+    message.update(completed);
+    state.history.push({ role: "assistant", content: answer });
+    await saveEpisode(text, answer);
+    consolidateInBackground(text, answer);
+    setStatus(
+      completed.status === "completed" ? "ok" : "bad",
+      completed.status === "completed" ? "Dynamic Flow 完成" : "Dynamic Flow 部分失败",
+    );
+  } catch (error) {
+    const aborted = controller.signal.aborted || (error as Error).name === "AbortError";
+    message.error(
+      aborted ? "Dynamic Flow 已停止" : `Dynamic Flow 失败：${(error as Error).message}`,
+      aborted,
+    );
+    setStatus(aborted ? "ok" : "bad", aborted ? "已停止" : "Dynamic Flow 失败");
+  } finally {
+    await workflowWorkspace.refresh(state.sessionId);
+    await safePersistCurrentSession();
+    state.running = false;
+    currentController = null;
+    render();
+  }
+}
+
 // -------- Boot --------
 
 async function boot() {
   try {
     const session = await sessionRepository.ensure(state.sessionId, state.agentMode);
     state.history = structuredClone(session.history);
-    state.agentMode = session.agentMode;
+    state.agentMode = state.flowEnabled || session.agentMode;
     state.sessions = await sessionRepository.list();
     restoreHistory();
   } catch (err) {

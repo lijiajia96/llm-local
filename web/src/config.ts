@@ -10,6 +10,7 @@ export const STORAGE_KEYS = {
   baseUrl: "vllm.baseUrl",
   model: "vllm.model",
   agent: "vllm.agentMode",
+  flow: "vllm.flowEnabled",
   rag: "vllm.ragEnabled",
   sessionId: "vllm.sessionId",
 } as const;

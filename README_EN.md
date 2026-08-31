@@ -10,7 +10,7 @@
 ![Vite](https://img.shields.io/badge/Vite-646CFF?logo=vite&logoColor=white)
 ![vLLM](https://img.shields.io/badge/vLLM-Compatible-4B8BBE)
 
-A local-first, browser-based Agent Runtime built with Vite + TypeScript, directly connected to an OpenAI-compatible vLLM. It supports SSE streaming chat, image input, ReAct Tools, Local Memory, Skills, historical sessions, and `@role` multi-agent parallel tasks.
+A local-first, browser-based Agent Runtime built with Vite + TypeScript, directly connected to an OpenAI-compatible vLLM. It supports SSE streaming chat, image input, ReAct Tools, Local Memory, Skills, historical sessions, `@role` multi-agent parallel tasks, and Dynamic Flow that learns and retrieves successful orchestration patterns.
 
 A local-first, browser-based multi-agent runtime and hands-on vLLM tutorial covering OpenAI-compatible streaming, ReAct tools, agent memory, skills, sessions, and observable parallel agents.
 
@@ -57,6 +57,7 @@ The tutorial is aimed at developers new to local large models and Agent engineer
 - **Permissions enforced by the Runtime**: Skill Manifest, Tool Registry, runtime whitelists, duplicate call interception, and network circuit breaking;
 - **Implementing Local Memory OS**: IndexedDB, multilingual-e5, local embedding, hybrid retrieval, background consolidation, and temporal facts;
 - **Implementing observable multi-agents**: `@role` routing, Agent Profile, bounded concurrency, independent cancellation, Tasks UI, and result write-back;
+- **Implementing learnable Dynamic Flow**: DAG planning, parallel fan-out/fan-in, Critic validation, and semantic Flow Skill retrieval;
 - **Providing a complete practical system**: Classroom experiments, fault injection, test routes, comprehensive projects, grading criteria, and go-live checklists.
 
 ### Learning Path
@@ -145,6 +146,77 @@ The complete course content, experiments, and checklists are available in [CLASS
 - Agent, Memory, and Skills all provide visual management entry points;
 - Network search supports Jina, BBC/Bing RSS, and GitHub REST API fallback chains.
 
+### Learnable Dynamic Flow
+
+- The Planner builds a validated DAG from the goal and explicit Agent capability metadata;
+- A separate Critic checks execution evidence before a successful Flow can become a reusable Flow Skill;
+- Flow Skills store descriptions, trigger examples, graph examples, and required Skill/Tool capabilities;
+- E5 semantic retrieval, lexical matching, quality signals, and MMR select up to three references;
+- Retrieved templates guide planning but never bypass parameter adaptation, capability binding, or DAG validation.
+
+#### How Flows Are Stored and Reused
+
+Dynamic Flows are stored in the browser's `vllm-agent` IndexedDB database rather than as JSON
+files in the repository. Two Object Stores serve different purposes:
+
+| Object Store | Contents | Purpose |
+|---|---|---|
+| `workflowRuns` | Goal, executed DAG, node states and outputs, final answer, quality evaluation, and retrieved references | Inspect and diagnose a specific run |
+| `workflowTemplates` | Reusable description, trigger examples, graph example, capability requirements, embedding, quality score, and success count | Guide planning for similar future tasks |
+
+An actual Flow Skill record looks like this:
+
+```json
+{
+  "id": "flow-template-uuid",
+  "sourceRunId": "source-flow-run-id",
+  "name": "Parallel Calculation and Comparison",
+  "description": "Run two independent calculations in parallel, then aggregate and compare them",
+  "triggerExamples": [
+    "Calculate two expressions separately and compare the results",
+    "Process two values in parallel and determine which is larger"
+  ],
+  "exampleGoal": "Calculate 8×7 and 9×6 in parallel, then compare them",
+  "nodes": [
+    {
+      "id": "calculate-a",
+      "goalExample": "Calculate the first expression",
+      "requiredSkillIds": ["core-agent"],
+      "requiredTools": ["run_js"],
+      "dependsOn": []
+    },
+    {
+      "id": "compare-results",
+      "goalExample": "Compare both upstream results",
+      "requiredSkillIds": ["core-agent"],
+      "requiredTools": [],
+      "dependsOn": ["calculate-a", "calculate-b"]
+    }
+  ],
+  "embedding": ["384-dimensional local E5 vector"],
+  "qualityScore": 1,
+  "successCount": 2,
+  "enabled": true,
+  "version": 1
+}
+```
+
+The complete lifecycle is:
+
+```text
+Flow completes
+→ Critic checks the goal, node evidence, and final answer
+→ success=true and qualityScore>=0.8
+→ create or reinforce an entry in workflowTemplates
+→ hybrid-search descriptions, triggers, and example goals for a new task
+→ MMR selects up to three Flow Skills
+→ Planner adapts the references and validates a new DAG
+```
+
+A Flow Skill is not a directly executable function. It is validated orchestration experience.
+The Planner still regenerates task parameters and Agent bindings from the current request and
+explicit capability metadata, preventing stale roles or old task values from being copied.
+
 ### Local Memory OS
 
 - Supports three types of memory: `preference`, `fact`, and `episode`;
@@ -201,6 +273,12 @@ The Scheduler runs tasks concurrently within the upper limit. The Tasks panel in
 Upon task completion, the final answer is written back to the original main session as a message with a role identifier; switching sessions does not cause result mixing.
 
 ![Sub-Agent Results Written Back to Main Session](./docs/images/web-subagent-results.png)
+
+### Dynamic Flow Learning and Retrieval Test
+
+The first run dynamically planned two parallel calculations followed by a comparison, passed the Critic at `100%`, and was saved as `Parallel Calculation and Comparison`. A second task with different values retrieved the Flow Skill at `74%`, regenerated the parameter-specific DAG, and reinforced the template to two successful uses.
+
+![Dynamic Flow Learning, Retrieval, and Reuse](./docs/images/dynamic-flow-reuse.png)
 
 ## Sub-Agent Running Example
 

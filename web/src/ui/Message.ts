@@ -1,5 +1,6 @@
 import { h } from "./dom";
 import { renderMarkdown } from "./markdown";
+import type { WorkflowRun } from "../workflow/types";
 
 /** Split raw assistant text into optional <think>…</think> segment + answer. */
 function extractThink(raw: string): { think: string; answer: string } {
@@ -94,4 +95,89 @@ export function createSubAgentResultMessage(result: SubAgentResult) {
     answer,
   );
   return h("div", { className: "message message--assistant message--sub-agent" }, bubble);
+}
+
+const FLOW_STATUS_LABEL: Record<WorkflowRun["status"], string> = {
+  planning: "规划中",
+  running: "执行中",
+  completed: "已完成",
+  failed: "部分失败",
+  cancelled: "已取消",
+};
+
+export function createWorkflowMessage() {
+  const summary = h("div", { className: "flow-message__summary" }, "正在生成任务图…");
+  const reuse = h("div", { className: "flow-message__reuse", hidden: true });
+  const nodes = h("div", { className: "flow-message__nodes" });
+  const answer = h("div", { className: "flow-message__answer markdown", hidden: true });
+  const status = h("span", { className: "flow-message__status" }, "规划中");
+  const bubble = h(
+    "div",
+    { className: "bubble bubble--flow" },
+    h(
+      "div",
+      { className: "flow-message__head" },
+      h("strong", {}, "Dynamic Flow"),
+      status,
+    ),
+    summary,
+    reuse,
+    nodes,
+    answer,
+  );
+  const el = h("div", { className: "message message--assistant message--flow" }, bubble);
+
+  function update(run: WorkflowRun) {
+    status.textContent = FLOW_STATUS_LABEL[run.status];
+    status.dataset.status = run.status;
+    summary.textContent = run.summary;
+    reuse.replaceChildren();
+    if (run.matchedTemplates?.length) {
+      reuse.hidden = false;
+      reuse.append(
+        h("strong", {}, "参考 Flow"),
+        ...run.matchedTemplates.map((match) =>
+          h("span", {}, `${match.name} · ${Math.round(match.score * 100)}%`)
+        ),
+      );
+    } else if (run.learnedTemplateName) {
+      reuse.hidden = false;
+      reuse.append(
+        h("strong", {}, "已学习"),
+        h("span", {}, run.learnedTemplateName),
+      );
+    } else {
+      reuse.hidden = true;
+    }
+    nodes.replaceChildren(...run.nodes.map((node) =>
+      h(
+        "div",
+        { className: `flow-node flow-node--${node.status}` },
+        h(
+          "div",
+          { className: "flow-node__head" },
+          h("span", { className: "flow-node__state" }),
+          h("strong", {}, node.title),
+          h("span", {}, node.agentId),
+        ),
+        node.dependsOn.length
+          ? h("div", { className: "flow-node__deps" }, `依赖：${node.dependsOn.join(", ")}`)
+          : h("div", { className: "flow-node__deps" }, "入口节点"),
+        node.error ? h("div", { className: "flow-node__error" }, node.error) : "",
+      ),
+    ));
+    if (run.finalAnswer) {
+      answer.hidden = false;
+      renderMarkdown(answer, run.finalAnswer);
+    }
+  }
+
+  function error(message: string, cancelled = false) {
+    status.textContent = cancelled ? "已取消" : "失败";
+    status.dataset.status = cancelled ? "cancelled" : "failed";
+    answer.hidden = false;
+    answer.textContent = message;
+  }
+
+  return { el, update, error };
 }

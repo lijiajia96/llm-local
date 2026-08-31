@@ -49,6 +49,9 @@ export type AgentTaskInput = {
   sessionId: string;
   agentId: string;
   goal: string;
+  workflowId?: string;
+  workflowNodeId?: string;
+  dependsOn?: string[];
 };
 
 export type AgentTaskProgress = {

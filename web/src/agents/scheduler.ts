@@ -55,6 +55,7 @@ export class AgentTaskScheduler {
   private readonly controllers = new Map<string, AbortController>();
   private readonly listeners = new Set<AgentTaskSchedulerListener>();
   private readonly idleWaiters = new Set<() => void>();
+  private readonly taskWaiters = new Map<string, Set<(task: AgentTask) => void>>();
   private maxConcurrency: number;
 
   constructor(options: AgentTaskSchedulerOptions) {
@@ -89,6 +90,9 @@ export class AgentTaskScheduler {
       sessionId,
       agentId,
       goal,
+      workflowId: input.workflowId,
+      workflowNodeId: input.workflowNodeId,
+      dependsOn: input.dependsOn ? [...input.dependsOn] : undefined,
       status: "queued",
       events: [],
       createdAt: now,
@@ -168,6 +172,17 @@ export class AgentTaskScheduler {
     return new Promise((resolve) => this.idleWaiters.add(resolve));
   }
 
+  waitForTask(id: string): Promise<AgentTask> {
+    const task = this.tasks.get(id);
+    if (!task) return Promise.reject(new Error(`unknown task id: ${id}`));
+    if (TERMINAL_STATUSES.has(task.status)) return Promise.resolve(cloneTask(task));
+    return new Promise((resolve) => {
+      const waiters = this.taskWaiters.get(id) ?? new Set();
+      waiters.add(resolve);
+      this.taskWaiters.set(id, waiters);
+    });
+  }
+
   private drain(): void {
     while (this.controllers.size < this.maxConcurrency && this.queue.length) {
       const id = this.queue.shift()!;
@@ -240,6 +255,12 @@ export class AgentTaskScheduler {
           : task.error ?? "任务执行失败",
     });
     this.emit("task-updated", task);
+    const waiters = this.taskWaiters.get(task.id);
+    if (waiters) {
+      const snapshot = cloneTask(task);
+      for (const resolve of waiters) resolve(snapshot);
+      this.taskWaiters.delete(task.id);
+    }
   }
 
   private appendProgress(

@@ -7,6 +7,8 @@ export type StreamOpts = {
   temperature?: number;
   maxTokens?: number;
   stop?: string[];
+  responseFormat?: Record<string, unknown>;
+  chatTemplateKwargs?: Record<string, unknown>;
   signal?: AbortSignal;
   onDelta?: (delta: string, accumulated: string) => void;
 };
@@ -28,6 +30,8 @@ export async function streamChat(baseUrl: string, opts: StreamOpts): Promise<str
     temperature: opts.temperature ?? 0.3,
     max_tokens: opts.maxTokens ?? 1500,
     ...(opts.stop ? { stop: opts.stop } : {}),
+    ...(opts.responseFormat ? { response_format: opts.responseFormat } : {}),
+    ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
   };
   const res = await fetch(`${trimBase(baseUrl)}/chat/completions`, {
     method: "POST",

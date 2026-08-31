@@ -1,5 +1,5 @@
 const DB_NAME = "vllm-agent";
-const DB_VERSION = 7;
+const DB_VERSION = 9;
 
 export const STORES = {
   memories: "memories",
@@ -10,6 +10,8 @@ export const STORES = {
   ragDocuments: "ragDocuments",
   ragChunks: "ragChunks",
   ragEvalCases: "ragEvalCases",
+  workflowRuns: "workflowRuns",
+  workflowTemplates: "workflowTemplates",
 } as const;
 
 let databasePromise: Promise<IDBDatabase> | null = null;
@@ -66,6 +68,17 @@ export function openDatabase(): Promise<IDBDatabase> {
         const store = db.createObjectStore(STORES.ragEvalCases, { keyPath: "id" });
         store.createIndex("expectedDocumentId", "expectedDocumentId");
         store.createIndex("createdAt", "createdAt");
+      }
+      if (!db.objectStoreNames.contains(STORES.workflowRuns)) {
+        const store = db.createObjectStore(STORES.workflowRuns, { keyPath: "id" });
+        store.createIndex("sessionId", "sessionId");
+        store.createIndex("updatedAt", "updatedAt");
+      }
+      if (!db.objectStoreNames.contains(STORES.workflowTemplates)) {
+        const store = db.createObjectStore(STORES.workflowTemplates, { keyPath: "id" });
+        store.createIndex("enabled", "enabled");
+        store.createIndex("sourceRunId", "sourceRunId", { unique: true });
+        store.createIndex("updatedAt", "updatedAt");
       }
     };
     request.onsuccess = () => resolve(request.result);
