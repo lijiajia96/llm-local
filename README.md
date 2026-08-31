@@ -155,6 +155,7 @@ flowchart LR
 - Flow Skill 保存自然语言描述、触发示例、DAG 示例和能力约束；
 - 新任务通过 E5 语义检索、词法匹配、质量分与 MMR 召回最多 3 个 Flow Skill；
 - 召回结果只作为 Planner 参考，任务参数、Agent 绑定和 DAG 合法性都会重新生成和校验。
+- 每次节点状态变化都会保存 Checkpoint；页面刷新后可保留已完成节点并手动继续剩余 DAG。
 
 #### Flow 如何存储和复用
 
@@ -163,7 +164,7 @@ Dynamic Flow 不保存为仓库中的 JSON 文件，而是写入浏览器 Indexe
 
 | Object Store | 内容 | 后续用途 |
 |---|---|---|
-| `workflowRuns` | 用户目标、实际 DAG、节点状态与输出、最终答案、质量评价、召回来源 | 查看和诊断一次具体执行 |
+| `workflowRuns` | 用户目标、实际 DAG、节点状态与输出、Checkpoint 序号、恢复次数、最终答案、质量评价、召回来源 | 查看、恢复和诊断一次具体执行 |
 | `workflowTemplates` | 可复用描述、触发示例、DAG 示例、能力约束、Embedding、质量分和成功次数 | 为后续相似任务提供规划参考 |
 
 一个实际的 Flow Skill 记录类似：
@@ -218,6 +219,31 @@ Flow 执行完成
 这里的 Flow Skill 不是可以直接执行的固定函数。它保存的是经过验证的编排经验；具体参数和
 Agent 绑定仍由 Planner 根据当前请求与显式能力 metadata 重新生成，避免把历史参数或失效角色直接复制到新任务。
 
+#### Checkpoint 恢复
+
+`workflowRuns` 中的运行记录还包含：
+
+```json
+{
+  "status": "interrupted",
+  "checkpointSeq": 7,
+  "lastCheckpointAt": "2026-08-31T13:14:19.000Z",
+  "resumeCount": 0,
+  "nodes": [
+    { "id": "calculate-a", "status": "completed", "attempts": 1, "result": "84" },
+    { "id": "calculate-b", "status": "completed", "attempts": 1, "result": "99" },
+    { "id": "compare", "status": "interrupted", "attempts": 1 }
+  ]
+}
+```
+
+应用启动时会把遗留的 `planning/running` Flow 标记为 `interrupted`。用户点击“从 Checkpoint
+恢复”后，已完成节点直接复用持久化结果，只有 `interrupted/pending` 节点重新进入 Scheduler。
+恢复前还会重新检查模型、Agent、Skill 和 Tool 是否仍然可用。
+
+恢复采用手动触发，因为中断节点可能已经产生外部副作用。工具写操作仍应提供幂等键或执行前检查；
+手动取消的 `cancelled` Flow 不会自动变成可恢复状态。
+
 ### Local Memory OS
 
 - 支持 `preference`、`fact`、`episode` 三类记忆；
@@ -236,7 +262,7 @@ Agent 绑定仍由 Planner 根据当前请求与显式能力 metadata 重新生�
 | 多 Agent | `@角色` 显式派发和并行运行 | 通常支持更复杂的自动协作 |
 | 可观察性 | 原生 Tasks UI | 常依赖日志或外部 tracing 平台 |
 | Memory | IndexedDB + 本地 embedding | 常依赖外部向量库或 Memory 服务 |
-| 跨页面持续运行 | 暂不支持 | 服务端框架通常支持 |
+| 跨页面持续运行 | 页面关闭时暂停，可从节点 Checkpoint 手动恢复 | 服务端框架通常支持后台持续运行 |
 | 生态规模 | 工具较少、权限易控制 | 集成丰富，但复杂度更高 |
 
 ## 适用边界
@@ -283,6 +309,10 @@ Scheduler 会在并发上限内同时运行任务。Tasks 面板独立展示每�
 第二次使用不同数字提交同构任务时，本地 E5 混合检索命中该 Flow Skill，匹配度为 `74%`。Planner 参考其拓扑但重新生成当前参数对应的节点，完成 `12×4=48`、`7×9=63` 以及 `48 < 63` 的验证。模板成功次数更新为 2。
 
 ![Dynamic Flow 学习、召回与复用测试](./docs/images/dynamic-flow-reuse.png)
+
+Checkpoint 故障注入测试在 Flow 完成 `2/3` 个节点时强制刷新页面。重新打开后记录显示
+`待恢复 2/3 · Checkpoint #7`；恢复时只重新提交最后一个汇总节点，最终状态为
+`已完成 · Checkpoint #11 · 恢复 1 次`。
 
 ## 子 Agent 运行示例
 

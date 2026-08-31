@@ -100,6 +100,7 @@ export function createSubAgentResultMessage(result: SubAgentResult) {
 const FLOW_STATUS_LABEL: Record<WorkflowRun["status"], string> = {
   planning: "规划中",
   running: "执行中",
+  interrupted: "待恢复",
   completed: "已完成",
   failed: "部分失败",
   cancelled: "已取消",

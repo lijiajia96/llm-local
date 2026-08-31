@@ -55,7 +55,10 @@ async function saveAndEmit(
   progress: WorkflowProgress,
   onProgress?: (progress: WorkflowProgress) => void,
 ): Promise<void> {
-  run.updatedAt = timestamp();
+  const now = timestamp();
+  run.updatedAt = now;
+  run.lastCheckpointAt = now;
+  run.checkpointSeq++;
   await repository.put(run);
   onProgress?.(structuredClone(progress));
 }
@@ -84,9 +87,37 @@ export function createWorkflowRun(args: {
       description: template.description,
       score,
     })),
+    checkpointSeq: 0,
+    lastCheckpointAt: now,
+    resumeCount: 0,
     createdAt: now,
     updatedAt: now,
   };
+}
+
+export function prepareWorkflowResume(stored: WorkflowRun): WorkflowRun {
+  if (stored.status !== "interrupted") {
+    throw new Error(`Workflow is not resumable: ${stored.status}`);
+  }
+  const run = structuredClone(stored);
+  run.resumeCount++;
+  run.error = undefined;
+  run.interruptedAt = undefined;
+  run.finishedAt = undefined;
+  run.finalAnswer = undefined;
+  run.qualityScore = undefined;
+  run.qualityReason = undefined;
+  run.learnedTemplateId = undefined;
+  run.learnedTemplateName = undefined;
+  for (const node of run.nodes) {
+    if (node.status !== "interrupted") continue;
+    node.status = "pending";
+    node.taskId = undefined;
+    node.error = undefined;
+    node.startedAt = undefined;
+    node.finishedAt = undefined;
+  }
+  return run;
 }
 
 export async function executeWorkflow(args: {
@@ -99,6 +130,9 @@ export async function executeWorkflow(args: {
 }): Promise<WorkflowRun> {
   const { run } = args;
   run.status = "running";
+  run.error = undefined;
+  run.interruptedAt = undefined;
+  run.finishedAt = undefined;
   await saveAndEmit(args.repository, run, { type: "planned", run }, args.onProgress);
 
   try {
@@ -140,6 +174,10 @@ export async function executeWorkflow(args: {
       await Promise.all(ready.map(async (node) => {
         node.status = "running";
         node.startedAt = timestamp();
+        node.finishedAt = undefined;
+        node.error = undefined;
+        node.taskId = undefined;
+        node.attempts = (node.attempts ?? 0) + 1;
         const task = args.scheduler.submit({
           sessionId: run.sessionId,
           agentId: node.agentId,

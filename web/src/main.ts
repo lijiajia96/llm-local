@@ -44,11 +44,16 @@ import { createTrajectoryWorkspace } from "./ui/TrajectoryWorkspace";
 import { createRagManager } from "./ui/RagManager";
 import { createWorkflowWorkspace } from "./ui/WorkflowWorkspace";
 import { h, loadPref, savePref } from "./ui/dom";
-import { executeWorkflow, createWorkflowRun } from "./workflow/executor";
+import {
+  executeWorkflow,
+  createWorkflowRun,
+  prepareWorkflowResume,
+} from "./workflow/executor";
 import { evaluateWorkflowForLearning, learnWorkflowTemplate } from "./workflow/learner";
 import { planWorkflow } from "./workflow/planner";
 import { WorkflowRepository } from "./workflow/repository";
 import { WorkflowTemplateRepository } from "./workflow/templateRepository";
+import type { WorkflowRun } from "./workflow/types";
 
 import { CHAT_TOKENS, DEFAULT_BASE_URL, STORAGE_KEYS } from "./config";
 
@@ -67,6 +72,7 @@ type AppState = {
   memoryCount: number;
   ragCount: number;
   skillCount: number;
+  workflowResumeCount: number;
   status: { state: ConnectionState; text: string };
   running: boolean;
   attachments: string[];
@@ -100,6 +106,7 @@ const state: AppState = {
   memoryCount: 0,
   ragCount: 0,
   skillCount: 0,
+  workflowResumeCount: 0,
   status: { state: "idle", text: "就绪" },
   running: false,
   attachments: [],
@@ -218,6 +225,7 @@ const ragManager = createRagManager(ragRepository, () => void refreshAgentMetada
 const workflowWorkspace = createWorkflowWorkspace(
   workflowRepository,
   workflowTemplateRepository,
+  { onResume: (runId) => void resumeDynamicFlow(runId) },
 );
 taskScheduler.subscribe((event) => {
   state.agentTasks = taskScheduler.listTasks();
@@ -264,6 +272,7 @@ function render() {
     memoryCount: state.memoryCount,
     ragCount: state.ragCount,
     skillCount: state.skillCount,
+    workflowResumeCount: state.workflowResumeCount,
     running: state.running,
     status: state.status,
   });
@@ -303,6 +312,8 @@ async function switchSession(id: string) {
 }
 
 async function activateSession(session: SessionRecord, statusText: string) {
+  const interrupted = await workflowRepository.markInterrupted(session.id);
+  state.workflowResumeCount = interrupted.length;
   state.sessionId = session.id;
   state.history = structuredClone(session.history);
   state.agentMode = state.flowEnabled || session.agentMode;
@@ -315,7 +326,10 @@ async function activateSession(session: SessionRecord, statusText: string) {
   render();
   void trajectoryWorkspace.refresh(session.id);
   await refreshAgentMetadata();
-  setStatus("ok", statusText);
+  setStatus(
+    "ok",
+    interrupted.length ? `检测到 ${interrupted.length} 个可恢复 Flow` : statusText,
+  );
   composer.focus();
 }
 
@@ -823,6 +837,70 @@ async function sendAgent(text: string) {
   }
 }
 
+async function executeAndFinalizeWorkflow(
+  run: WorkflowRun,
+  message: ReturnType<typeof createWorkflowMessage>,
+  controller: AbortController,
+) {
+  const completed = await executeWorkflow({
+    run,
+    baseUrl: state.baseUrl,
+    scheduler: taskScheduler,
+    repository: workflowRepository,
+    signal: controller.signal,
+    onProgress: ({ run: current }) => {
+      message.update(current);
+      chatView.scrollToBottom();
+      const done = current.nodes.filter((node) =>
+        node.status === "completed"
+        || node.status === "failed"
+        || node.status === "skipped"
+      ).length;
+      setStatus("ok", `Dynamic Flow · ${done}/${current.nodes.length}`);
+    },
+  });
+  const answer = stripThink(completed.finalAnswer ?? "").trim();
+  if (!answer) throw new Error("Workflow did not produce a final answer");
+  completed.finalAnswer = answer;
+  await workflowRepository.put(completed);
+  message.update(completed);
+
+  setStatus("ok", "Dynamic Flow 正在评估可复用性…");
+  const evaluation = await evaluateWorkflowForLearning({
+    baseUrl: state.baseUrl,
+    model: completed.model,
+    run: completed,
+    signal: controller.signal,
+  });
+  try {
+    const learned = await learnWorkflowTemplate({
+      run: completed,
+      evaluation,
+      agents: state.agentProfiles,
+      repository: workflowTemplateRepository,
+    });
+    if (learned) {
+      completed.learnedTemplateId = learned.id;
+      completed.learnedTemplateName = learned.name;
+    }
+  } catch (learningError) {
+    console.warn("Workflow template learning failed", learningError);
+    completed.qualityScore = evaluation.score;
+    completed.qualityReason = `模板保存失败：${
+      learningError instanceof Error ? learningError.message : String(learningError)
+    }`;
+  }
+  await workflowRepository.put(completed);
+  message.update(completed);
+  state.history.push({ role: "assistant", content: answer });
+  await saveEpisode(completed.goal, answer);
+  consolidateInBackground(completed.goal, answer);
+  setStatus(
+    completed.status === "completed" ? "ok" : "bad",
+    completed.status === "completed" ? "Dynamic Flow 完成" : "Dynamic Flow 部分失败",
+  );
+}
+
 async function sendDynamicFlow(text: string) {
   state.history.push({ role: "user", content: text });
   chatView.addMessage(createUserMessage(text, []));
@@ -861,64 +939,7 @@ async function sendDynamicFlow(text: string) {
     await workflowRepository.put(run);
     message.update(run);
     setStatus("ok", `Dynamic Flow 执行中 · ${run.nodes.length} 个节点`);
-
-    const completed = await executeWorkflow({
-      run,
-      baseUrl: state.baseUrl,
-      scheduler: taskScheduler,
-      repository: workflowRepository,
-      signal: controller.signal,
-      onProgress: ({ run: current }) => {
-        message.update(current);
-        chatView.scrollToBottom();
-        const done = current.nodes.filter((node) =>
-          node.status === "completed"
-          || node.status === "failed"
-          || node.status === "skipped"
-        ).length;
-        setStatus("ok", `Dynamic Flow · ${done}/${current.nodes.length}`);
-      },
-    });
-    const answer = stripThink(completed.finalAnswer ?? "").trim();
-    if (!answer) throw new Error("Workflow did not produce a final answer");
-    completed.finalAnswer = answer;
-    await workflowRepository.put(completed);
-    message.update(completed);
-
-    setStatus("ok", "Dynamic Flow 正在评估可复用性…");
-    const evaluation = await evaluateWorkflowForLearning({
-      baseUrl: state.baseUrl,
-      model: state.currentModel,
-      run: completed,
-      signal: controller.signal,
-    });
-    try {
-      const learned = await learnWorkflowTemplate({
-        run: completed,
-        evaluation,
-        agents: state.agentProfiles,
-        repository: workflowTemplateRepository,
-      });
-      if (learned) {
-        completed.learnedTemplateId = learned.id;
-        completed.learnedTemplateName = learned.name;
-      }
-    } catch (learningError) {
-      console.warn("Workflow template learning failed", learningError);
-      completed.qualityScore = evaluation.score;
-      completed.qualityReason = `模板保存失败：${
-        learningError instanceof Error ? learningError.message : String(learningError)
-      }`;
-    }
-    await workflowRepository.put(completed);
-    message.update(completed);
-    state.history.push({ role: "assistant", content: answer });
-    await saveEpisode(text, answer);
-    consolidateInBackground(text, answer);
-    setStatus(
-      completed.status === "completed" ? "ok" : "bad",
-      completed.status === "completed" ? "Dynamic Flow 完成" : "Dynamic Flow 部分失败",
-    );
+    await executeAndFinalizeWorkflow(run, message, controller);
   } catch (error) {
     const aborted = controller.signal.aborted || (error as Error).name === "AbortError";
     message.error(
@@ -935,15 +956,83 @@ async function sendDynamicFlow(text: string) {
   }
 }
 
+async function resumeDynamicFlow(runId: string) {
+  if (state.running) {
+    setStatus("bad", "已有任务正在运行");
+    return;
+  }
+  const stored = await workflowRepository.get(runId);
+  if (!stored || stored.sessionId !== state.sessionId) {
+    setStatus("bad", "找不到当前会话的 Flow Checkpoint");
+    return;
+  }
+  try {
+    const run = prepareWorkflowResume(stored);
+    const enabledAgents = new Map(
+      state.agentProfiles.filter((agent) => agent.enabled).map((agent) => [agent.id, agent]),
+    );
+    for (const node of run.nodes.filter((candidate) => candidate.status !== "completed")) {
+      const agent = enabledAgents.get(node.agentId);
+      if (!agent) throw new Error(`恢复失败，Agent 不可用：${node.agentId}`);
+      const missing = [
+        ...node.requiredSkillIds.filter((id) => !agent.skillIds.includes(id)),
+        ...node.requiredTools.filter((name) => !agent.allowedTools.includes(name)),
+      ];
+      if (missing.length) {
+        throw new Error(`恢复失败，节点 ${node.id} 缺少能力：${missing.join(", ")}`);
+      }
+    }
+    run.model = state.models.includes(run.model) ? run.model : state.currentModel;
+    if (!run.model) throw new Error("恢复失败，没有可用模型");
+
+    state.running = true;
+    state.workflowResumeCount = Math.max(0, state.workflowResumeCount - 1);
+    const controller = new AbortController();
+    currentController = controller;
+    const message = createWorkflowMessage();
+    message.update(run);
+    chatView.addMessage(message.el);
+    workflowWorkspace.close();
+    setStatus("ok", `从 Checkpoint #${run.checkpointSeq} 恢复 Dynamic Flow…`);
+    await workflowRepository.put(run);
+    try {
+      await executeAndFinalizeWorkflow(run, message, controller);
+    } catch (error) {
+      const aborted = controller.signal.aborted || (error as Error).name === "AbortError";
+      message.error(
+        aborted ? "Dynamic Flow 已停止" : `Dynamic Flow 恢复失败：${(error as Error).message}`,
+        aborted,
+      );
+      setStatus(aborted ? "ok" : "bad", aborted ? "已停止" : "Dynamic Flow 恢复失败");
+    } finally {
+      await workflowWorkspace.refresh(state.sessionId);
+      state.workflowResumeCount = (await workflowRepository.list(state.sessionId))
+        .filter((candidate) => candidate.status === "interrupted").length;
+      await safePersistCurrentSession();
+      state.running = false;
+      currentController = null;
+      render();
+    }
+  } catch (error) {
+    setStatus("bad", error instanceof Error ? error.message : String(error));
+    await workflowWorkspace.refresh(state.sessionId);
+  }
+}
+
 // -------- Boot --------
 
 async function boot() {
   try {
     const session = await sessionRepository.ensure(state.sessionId, state.agentMode);
+    const interrupted = await workflowRepository.markInterrupted(session.id);
+    state.workflowResumeCount = interrupted.length;
     state.history = structuredClone(session.history);
     state.agentMode = state.flowEnabled || session.agentMode;
     state.sessions = await sessionRepository.list();
     restoreHistory();
+    if (interrupted.length) {
+      state.status = { state: "ok", text: `检测到 ${interrupted.length} 个可恢复 Flow` };
+    }
   } catch (err) {
     console.error("Session load failed", err);
     setStatus("bad", "会话历史加载失败");

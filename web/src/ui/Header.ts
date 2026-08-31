@@ -14,6 +14,7 @@ export type HeaderModel = {
   memoryCount: number;
   ragCount: number;
   skillCount: number;
+  workflowResumeCount: number;
   running: boolean;
   status: { state: ConnectionState; text: string };
 };
@@ -129,7 +130,8 @@ export function createHeader(cb: HeaderCallbacks) {
   const workflowsBtn = h(
     "button",
     { className: "icon-btn ghost", title: "查看 Dynamic Flow 任务图", onClick: cb.onManageWorkflows },
-    "Flows",
+    "Flows ",
+    h("span", { className: "header-count", dataset: { role: "flow-count" } }),
   );
 
   const statusText = h("span", { className: "status-text" });
@@ -202,10 +204,13 @@ export function createHeader(cb: HeaderCallbacks) {
     const memoryCount = el.querySelector<HTMLElement>('[data-role="memory-count"]')!;
     const ragCount = el.querySelector<HTMLElement>('[data-role="rag-count"]')!;
     const skillCount = el.querySelector<HTMLElement>('[data-role="skill-count"]')!;
+    const flowCount = el.querySelector<HTMLElement>('[data-role="flow-count"]')!;
     agentCount.textContent = String(m.agentCount);
     memoryCount.textContent = String(m.memoryCount);
     ragCount.textContent = String(m.ragCount);
     skillCount.textContent = String(m.skillCount);
+    flowCount.textContent = m.workflowResumeCount ? String(m.workflowResumeCount) : "";
+    flowCount.hidden = !m.workflowResumeCount;
     dot.dataset.state = m.status.state;
     statusText.textContent = m.status.text;
   }

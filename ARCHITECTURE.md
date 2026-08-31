@@ -359,6 +359,8 @@ flowchart LR
     Validate --> Ready[计算 Ready Nodes]
     Ready --> Scheduler[AgentTaskScheduler<br/>最大并发 3]
     Scheduler --> Results[节点结果]
+    Scheduler --> Checkpoint[(节点 Checkpoint)]
+    Checkpoint -->|刷新后手动恢复| Ready
     Results -->|依赖全部完成| Ready
     Results --> Synthesis[Coordinator 汇总]
     Synthesis --> Answer[最终 Markdown]
@@ -382,6 +384,11 @@ flowchart LR
   候选经过 MMR 后最多向 Planner 注入 3 个模板；
 - 模板只作为规划示例，Planner 必须替换任务参数、按当前 Agent metadata 重新绑定能力并重新校验 DAG；
 - 无依赖或依赖已全部完成的节点进入 ready 集合，同层节点通过 Scheduler 并行执行；
+- 每次 Flow 或节点状态变化都会递增 `checkpointSeq` 并持久化完整状态；
+- 页面重新加载时，遗留的 `planning/running` 状态转换为 `interrupted`；恢复操作保留
+  `completed` 节点结果，仅将 `interrupted/pending` 节点重新加入调度；
+- 恢复前重新校验模型及 Agent 的显式 Skill/Tool 能力，手动取消的 Flow 不参与恢复；
+- 中断节点可能已经触发外部副作用，因此恢复必须由用户手动确认，写操作仍需具备幂等性；
 - 下游节点只接收直接依赖节点的结果，并受 6000 字符预算限制；
 - 上游失败时后继节点标记为 `skipped`，不继续错误传播；
 - 停止 Flow 会取消所有正在运行的子任务；

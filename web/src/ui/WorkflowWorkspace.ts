@@ -7,14 +7,20 @@ import { renderMarkdown } from "./markdown";
 const STATUS_LABEL: Record<WorkflowRun["status"], string> = {
   planning: "规划中",
   running: "执行中",
+  interrupted: "待恢复",
   completed: "已完成",
   failed: "失败",
   cancelled: "已取消",
 };
 
+export type WorkflowWorkspaceCallbacks = {
+  onResume: (runId: string) => void;
+};
+
 export function createWorkflowWorkspace(
   repository: WorkflowRepository,
   templateRepository: WorkflowTemplateRepository,
+  callbacks: WorkflowWorkspaceCallbacks,
 ) {
   let sessionId = "";
   let runs: WorkflowRun[] = [];
@@ -73,7 +79,13 @@ export function createWorkflowWorkspace(
             "div",
             { className: "workflow-detail__node-head" },
             h("strong", {}, node.title),
-            h("span", {}, `${node.agentId} · ${node.status}`),
+            h(
+              "span",
+              {},
+              `${node.agentId} · ${node.status}${
+                node.attempts ? ` · 尝试 ${node.attempts}` : ""
+              }`,
+            ),
           ),
           h("div", { className: "workflow-detail__goal" }, node.goal),
           h(
@@ -88,6 +100,18 @@ export function createWorkflowWorkspace(
     }
     const final = h("div", { className: "workflow-detail__final markdown" });
     if (run.finalAnswer) renderMarkdown(final, run.finalAnswer);
+    const resume = h(
+      "button",
+      {
+        className: "workflow-detail__resume",
+        title: "保留已完成节点，从最近 Checkpoint 继续",
+      },
+      "从 Checkpoint 恢复",
+    );
+    resume.addEventListener("click", () => {
+      resume.disabled = true;
+      callbacks.onResume(run.id);
+    });
     const references = run.matchedTemplates?.length
       ? h(
           "section",
@@ -128,8 +152,20 @@ export function createWorkflowWorkspace(
       h(
         "div",
         { className: "workflow-detail__meta" },
-        `${STATUS_LABEL[run.status]} · ${run.nodes.length} 节点 · ${new Date(run.createdAt).toLocaleString()}`,
+        `${STATUS_LABEL[run.status]} · ${run.nodes.length} 节点 · Checkpoint #${run.checkpointSeq} · 恢复 ${run.resumeCount} 次`,
       ),
+      run.status === "interrupted"
+        ? h(
+            "div",
+            { className: "workflow-detail__resume-row" },
+          h(
+            "span",
+            {},
+            `中断于 ${new Date(run.interruptedAt ?? run.updatedAt).toLocaleString()}；已完成节点不会重跑，请确认中断节点的外部写操作可安全重试。`,
+          ),
+            resume,
+          )
+        : "",
       h("p", { className: "workflow-detail__summary" }, run.summary),
       h("p", { className: "workflow-detail__description" }, run.description ?? ""),
       references,
@@ -230,7 +266,11 @@ export function createWorkflowWorkspace(
           "div",
           { className: "workflow-run__head" },
           h("strong", {}, STATUS_LABEL[run.status]),
-          h("span", {}, `${run.nodes.filter((node) => node.status === "completed").length}/${run.nodes.length}`),
+          h(
+            "span",
+            {},
+            `${run.nodes.filter((node) => node.status === "completed").length}/${run.nodes.length} · #${run.checkpointSeq}`,
+          ),
         ),
         h("div", { className: "workflow-run__goal" }, run.goal),
       );

@@ -1,6 +1,7 @@
 export type WorkflowStatus =
   | "planning"
   | "running"
+  | "interrupted"
   | "completed"
   | "failed"
   | "cancelled";
@@ -8,6 +9,7 @@ export type WorkflowStatus =
 export type WorkflowNodeStatus =
   | "pending"
   | "running"
+  | "interrupted"
   | "completed"
   | "failed"
   | "skipped";
@@ -79,6 +81,7 @@ export type WorkflowNode = WorkflowPlanNode & {
   taskId?: string;
   result?: string;
   error?: string;
+  attempts?: number;
   startedAt?: string;
   finishedAt?: string;
 };
@@ -103,6 +106,10 @@ export type WorkflowRun = {
   learnedTemplateName?: string;
   qualityScore?: number;
   qualityReason?: string;
+  checkpointSeq: number;
+  lastCheckpointAt: string;
+  resumeCount: number;
+  interruptedAt?: string;
   finalAnswer?: string;
   error?: string;
   createdAt: string;

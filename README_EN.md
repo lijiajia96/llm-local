@@ -153,6 +153,7 @@ The complete course content, experiments, and checklists are available in [CLASS
 - Flow Skills store descriptions, trigger examples, graph examples, and required Skill/Tool capabilities;
 - E5 semantic retrieval, lexical matching, quality signals, and MMR select up to three references;
 - Retrieved templates guide planning but never bypass parameter adaptation, capability binding, or DAG validation.
+- Every node-state transition creates a checkpoint; after a reload, completed nodes remain reusable and the remaining DAG can be resumed manually.
 
 #### How Flows Are Stored and Reused
 
@@ -161,7 +162,7 @@ files in the repository. Two Object Stores serve different purposes:
 
 | Object Store | Contents | Purpose |
 |---|---|---|
-| `workflowRuns` | Goal, executed DAG, node states and outputs, final answer, quality evaluation, and retrieved references | Inspect and diagnose a specific run |
+| `workflowRuns` | Goal, executed DAG, node states and outputs, checkpoint sequence, resume count, final answer, quality evaluation, and retrieved references | Inspect, resume, and diagnose a specific run |
 | `workflowTemplates` | Reusable description, trigger examples, graph example, capability requirements, embedding, quality score, and success count | Guide planning for similar future tasks |
 
 An actual Flow Skill record looks like this:
@@ -217,6 +218,33 @@ A Flow Skill is not a directly executable function. It is validated orchestratio
 The Planner still regenerates task parameters and Agent bindings from the current request and
 explicit capability metadata, preventing stale roles or old task values from being copied.
 
+#### Checkpoint Recovery
+
+A persisted `workflowRuns` record also contains:
+
+```json
+{
+  "status": "interrupted",
+  "checkpointSeq": 7,
+  "lastCheckpointAt": "2026-08-31T13:14:19.000Z",
+  "resumeCount": 0,
+  "nodes": [
+    { "id": "calculate-a", "status": "completed", "attempts": 1, "result": "84" },
+    { "id": "calculate-b", "status": "completed", "attempts": 1, "result": "99" },
+    { "id": "compare", "status": "interrupted", "attempts": 1 }
+  ]
+}
+```
+
+On startup, stale `planning/running` Flows are marked as `interrupted`. When the user selects
+"Resume from Checkpoint," completed node outputs are reused and only `interrupted/pending` nodes
+return to the Scheduler. The runtime revalidates the model and explicit Agent, Skill, and Tool
+capabilities before resuming.
+
+Recovery is manual because an interrupted node may already have produced an external side effect.
+Write tools should still provide idempotency keys or pre-execution checks. Explicitly `cancelled`
+Flows are not converted into resumable runs.
+
 ### Local Memory OS
 
 - Supports three types of memory: `preference`, `fact`, and `episode`;
@@ -235,7 +263,7 @@ explicit capability metadata, preventing stale roles or old task values from bei
 | Multi-Agent | `@role` explicit dispatch and parallel execution | Usually supports more complex automatic collaboration |
 | Observability | Native Tasks UI | Often relies on logs or external tracing platforms |
 | Memory | IndexedDB + local embedding | Often relies on external vector stores or Memory services |
-| Cross-Page Continuous Execution | Not yet supported | Server-side frameworks usually support it |
+| Cross-Page Continuous Execution | Pauses on page close and supports manual node-checkpoint recovery | Server-side frameworks usually continue in the background |
 | Ecosystem Scale | Fewer tools, easier permission control | Rich integrations, but higher complexity |
 ## Applicable Boundaries
 
@@ -279,6 +307,10 @@ Upon task completion, the final answer is written back to the original main sess
 The first run dynamically planned two parallel calculations followed by a comparison, passed the Critic at `100%`, and was saved as `Parallel Calculation and Comparison`. A second task with different values retrieved the Flow Skill at `74%`, regenerated the parameter-specific DAG, and reinforced the template to two successful uses.
 
 ![Dynamic Flow Learning, Retrieval, and Reuse](./docs/images/dynamic-flow-reuse.png)
+
+The checkpoint fault-injection test forcibly reloaded the page after `2/3` nodes completed. The
+restored record showed `Interrupted 2/3 · Checkpoint #7`; resuming submitted only the final
+aggregation node and finished at `Checkpoint #11 · Resumed 1 time`.
 
 ## Sub-Agent Running Example
 

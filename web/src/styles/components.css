@@ -1267,6 +1267,7 @@ body.manager-open { overflow: hidden; }
   font-size: 11px;
 }
 .flow-message__status[data-status="completed"] { color: var(--success); }
+.flow-message__status[data-status="interrupted"] { color: var(--warn); }
 .flow-message__status[data-status="failed"],
 .flow-message__status[data-status="cancelled"] { color: var(--danger); }
 .flow-message__summary {
@@ -1305,6 +1306,7 @@ body.manager-open { overflow: hidden; }
   background: rgba(0, 0, 0, 0.16);
 }
 .flow-node--running { border-left-color: var(--accent-400); }
+.flow-node--interrupted { border-left-color: var(--warn); }
 .flow-node--completed { border-left-color: var(--success); }
 .flow-node--failed { border-left-color: var(--danger); }
 .flow-node--skipped { opacity: 0.58; }
@@ -1460,6 +1462,27 @@ body.manager-open { overflow: hidden; }
 }
 .workflow-detail__learning span { color: var(--success); font-family: var(--font-mono); }
 .workflow-detail__learning p { grid-column: 1 / -1; margin: 0; color: var(--text-dim); }
+.workflow-detail__resume-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.workflow-detail__resume {
+  padding: 7px 10px;
+  border-radius: var(--r-sm);
+  background: var(--accent-500);
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+}
+.workflow-detail__resume:disabled { opacity: 0.5; cursor: wait; }
 .workflow-detail__triggers {
   display: flex;
   flex-wrap: wrap;
@@ -1482,6 +1505,7 @@ body.manager-open { overflow: hidden; }
   border-radius: var(--r-sm);
 }
 .workflow-detail__node--running { border-left-color: var(--accent-400); }
+.workflow-detail__node--interrupted { border-left-color: var(--warn); }
 .workflow-detail__node--completed { border-left-color: var(--success); }
 .workflow-detail__node--failed { border-left-color: var(--danger); }
 .workflow-detail__node--skipped { opacity: 0.62; }
